@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package raidboss.v1;
+
+option go_package = "github.com/andrzej80/clan-raid-go/gen/raidboss/v1;raidbossv1";
+
+import "google/protobuf/timestamp.proto";
+
+service RaidService {
+  rpc CreateRaid(CreateRaidRequest) returns (CreateRaidResponse);
+  rpc GetRaid(GetRaidRequest) returns (GetRaidResponse);
+  rpc Attack(AttackRequest) returns (AttackResponse);
+  rpc GetLeaderboard(GetLeaderboardRequest) returns (GetLeaderboardResponse);
+  rpc WatchRaid(WatchRaidRequest) returns (stream WatchRaidResponse);
+  rpc ListRewards(ListRewardsRequest) returns (ListRewardsResponse);
+}
+
+enum RaidStatus {
+  RAID_STATUS_UNSPECIFIED = 0;
+  RAID_STATUS_ACTIVE = 1;
+  RAID_STATUS_DEFEATED = 2;
+  RAID_STATUS_EXPIRED = 3;
+}
+
+message Raid {
+  string id = 1;
+  int64 clan_id = 2;
+  string boss_name = 3;
+  int64 hp_max = 4;
+  int64 hp_left = 5;
+  RaidStatus status = 6;
+  google.protobuf.Timestamp ends_at = 7;
+}
+
+message CreateRaidRequest {
+  int64 clan_id = 1;
+  string boss_name = 2;
+  int64 hp_max = 3;
+  int32 duration_sec = 4;
+}
+message CreateRaidResponse { Raid raid = 1; }
+
+message GetRaidRequest { string raid_id = 1; }
+message GetRaidResponse { Raid raid = 1; }
+
+// Игрок берётся из metadata "x-player-id".
+message AttackRequest {
+  string raid_id = 1;
+  string idempotency_key = 2; // UUID, генерирует клиент; повтор с тем же ключом — тот же удар
+}
+message AttackResponse {
+  string hit_id = 1;
+  int32 damage = 2;
+  bool is_crit = 3;
+}
+
+message GetLeaderboardRequest {
+  string raid_id = 1;
+  int32 limit = 2;
+}
+message LeaderboardEntry {
+  int64 player_id = 1;
+  int64 total_damage = 2;
+}
+message GetLeaderboardResponse { repeated LeaderboardEntry entries = 1; }
+
+message WatchRaidRequest { string raid_id = 1; }
+message WatchRaidResponse {
+  oneof update {
+    Raid snapshot = 1;                       // всегда первым сообщением
+    int64 hp_left = 2;
+    GetLeaderboardResponse leaderboard = 3;
+    RaidFinished finished = 4;               // последнее сообщение, затем сервер закрывает стрим
+  }
+}
+message RaidFinished {
+  RaidStatus status = 1;
+  int64 killer_player_id = 2;
+}
+
+message ListRewardsRequest { int64 player_id = 1; }
+message Reward {
+  string raid_id = 1;
+  string kind = 2;
+  int32 amount = 3;
+}
+message ListRewardsResponse { repeated Reward rewards = 1; }
