@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -19,7 +20,9 @@ func Setup(ctx context.Context) (func(context.Context) error, error) {
 
 	res, err := resource.New(ctx, resource.WithFromEnv())
 	if err != nil {
-		exp.Shutdown(ctx)
+		if shutdownErr := exp.Shutdown(ctx); shutdownErr != nil {
+			slog.Warn("shutdown exporter", "err", shutdownErr)
+		}
 		return nil, fmt.Errorf("create resource: %w", err)
 	}
 

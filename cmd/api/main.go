@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -66,7 +67,13 @@ func run(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	defer shutdownTelemetry(ctx)
+	tctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer func() {
+		cancel()
+		if err := shutdownTelemetry(tctx); err != nil {
+			slog.Warn("Telemetry shutdown error")
+		}
+	}()
 
 	dbCfg, err := loadDbConfig()
 	if err != nil {
@@ -124,9 +131,6 @@ func run(cfg *Config) error {
 	}
 
 	slog.Info("gRPC server stopped")
-	tctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = shutdownTelemetry(tctx)
 	return nil
 }
 
@@ -204,7 +208,7 @@ func loadConfig() (*Config, error) {
 func loadDbConfig() (*postgres.DbConfig, error) {
 	dbUrl := os.Getenv("DATABASE_URL")
 	if dbUrl == "" {
-		return nil, fmt.Errorf("invalid DATABASE_URL")
+		return nil, errors.New("invalid DATABASE_URL")
 	}
 
 	cfg := &postgres.DbConfig{
@@ -223,7 +227,7 @@ func getEnvInt(key string, defaultValue int32) int32 {
 		slog.Warn("Value is set to default", "valueName", key)
 		return defaultValue
 	}
-	parsedValue, err := strconv.Atoi(fromEnv)
+	parsedValue, err := strconv.ParseInt(fromEnv, 10, 32)
 	if err != nil {
 		slog.Warn("Value is set to default", "valueName", key, "rawData", fromEnv)
 		return defaultValue
