@@ -33,6 +33,10 @@ const (
 	defaultMaxConnLifetime = 30 * time.Minute
 )
 
+type pinger interface {
+	Ping(ctx context.Context) error
+}
+
 type Config struct {
 	gRPCAddr       string
 	gRPCReflection bool
@@ -151,7 +155,7 @@ func watchHealth(ctx context.Context, pool *pgxpool.Pool, hs *health.Server) {
 }
 
 func checkDbStatus(ctx context.Context,
-	pool *pgxpool.Pool,
+	pool pinger,
 	lastStatus healthpb.HealthCheckResponse_ServingStatus,
 	hs *health.Server,
 ) healthpb.HealthCheckResponse_ServingStatus {
