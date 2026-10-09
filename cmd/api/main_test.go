@@ -8,10 +8,14 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+
+	raidbossV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/v1"
 )
 
 type fakePinger struct{ err error }
@@ -67,58 +71,73 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
-func TestHealth(t *testing.T) {
+func startTestServer(t *testing.T, cfg *Config) *grpc.ClientConn {
+	t.Helper()
+
+	lis := bufconn.Listen(1024 * 1024)
+	srv := newGRPCServer(newRaidService(), cfg)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	return conn
+}
+
+func TestRaidServiceIsUnimplemented(t *testing.T) {
 	t.Parallel()
+
+	conn := startTestServer(t, &Config{})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err := raidbossV1.NewRaidServiceClient(conn).GetRaid(ctx, &raidbossV1.GetRaidRequest{})
+	if got := status.Code(err); got != codes.Unimplemented {
+		t.Fatalf("GetRaid code = %v, want %v (err: %v)", got, codes.Unimplemented, err)
+	}
+}
+
+func TestCheckDbStatus(t *testing.T) {
 	tests := []struct {
 		name        string
 		startStatus healthpb.HealthCheckResponse_ServingStatus
 		finalStatus healthpb.HealthCheckResponse_ServingStatus
-		pingError   bool
+		pingError   error
 	}{
-		{name: "turn on", startStatus: healthpb.HealthCheckResponse_NOT_SERVING, finalStatus: healthpb.HealthCheckResponse_SERVING, pingError: false},
-		{name: "turn off", startStatus: healthpb.HealthCheckResponse_SERVING, finalStatus: healthpb.HealthCheckResponse_NOT_SERVING, pingError: true},
-		{name: "no change enabled", startStatus: healthpb.HealthCheckResponse_SERVING, finalStatus: healthpb.HealthCheckResponse_SERVING, pingError: false},
-		{name: "no change bisabled", startStatus: healthpb.HealthCheckResponse_NOT_SERVING, finalStatus: healthpb.HealthCheckResponse_NOT_SERVING, pingError: true},
+		{name: "turn on", startStatus: healthpb.HealthCheckResponse_NOT_SERVING, finalStatus: healthpb.HealthCheckResponse_SERVING, pingError: nil},
+		{name: "turn off", startStatus: healthpb.HealthCheckResponse_SERVING, finalStatus: healthpb.HealthCheckResponse_NOT_SERVING, pingError: errors.New("ping error")},
+		{name: "no change enabled", startStatus: healthpb.HealthCheckResponse_SERVING, finalStatus: healthpb.HealthCheckResponse_SERVING, pingError: nil},
+		{name: "no change bisabled", startStatus: healthpb.HealthCheckResponse_NOT_SERVING, finalStatus: healthpb.HealthCheckResponse_NOT_SERVING, pingError: errors.New("ping error")},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			lis := bufconn.Listen(1024 * 1024)
-			srv := grpc.NewServer()
+			t.Parallel()
 			hs := health.NewServer()
 			hs.SetServingStatus("", tc.startStatus)
-			healthpb.RegisterHealthServer(srv, hs)
-			go func() { _ = srv.Serve(lis) }()
-			t.Cleanup(srv.Stop)
 
-			conn, err := grpc.NewClient("passthrough:///bufnet",
-				grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-					return lis.DialContext(ctx)
-				}),
-				grpc.WithTransportCredentials(insecure.NewCredentials()),
-			)
-			t.Cleanup(func() { _ = conn.Close() })
-			if err != nil {
-				t.Fatalf("cannot create connection %v", err)
-			}
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			if tc.pingError {
-				checkDbStatus(
-					ctx,
-					fakePinger{errors.New("ping error")},
-					tc.startStatus,
-					hs,
-				)
-			} else {
-				checkDbStatus(
-					ctx,
-					fakePinger{nil},
-					tc.startStatus,
-					hs,
-				)
+			gotStatus := checkDbStatus(
+				ctx,
+				fakePinger{err: tc.pingError},
+				tc.startStatus,
+				hs,
+			)
+
+			if gotStatus != tc.finalStatus {
+				t.Fatalf("health check failed resived status %v expected %v", gotStatus, tc.finalStatus)
 			}
-			status, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{})
+			status, err := hs.Check(ctx, &healthpb.HealthCheckRequest{})
 			if err != nil {
 				t.Fatalf("health check failed %v", err)
 			}
