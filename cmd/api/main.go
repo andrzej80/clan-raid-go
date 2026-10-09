@@ -12,15 +12,16 @@ import (
 	"syscall"
 	"time"
 
-	raidbossV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/v1"
-	"github.com/andrzej80/clan-raid-go/internal/storage/postgres"
-	"github.com/andrzej80/clan-raid-go/internal/telemetry"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
+
+	raidbossV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/v1"
+	"github.com/andrzej80/clan-raid-go/internal/storage/postgres"
+	"github.com/andrzej80/clan-raid-go/internal/telemetry"
 )
 
 const (
