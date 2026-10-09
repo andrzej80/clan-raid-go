@@ -42,7 +42,6 @@ type raidService struct {
 }
 
 func main() {
-
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
@@ -61,7 +60,6 @@ func main() {
 }
 
 func run(cfg *Config) error {
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	shutdownTelemetry, err := telemetry.Setup(ctx)
@@ -146,13 +144,13 @@ func watchHealth(ctx context.Context, pool *pgxpool.Pool, hs *health.Server) {
 			lastStatus = checkDbStatus(ctx, pool, lastStatus, hs)
 		}
 	}
-
 }
 
 func checkDbStatus(ctx context.Context,
 	pool *pgxpool.Pool,
 	lastStatus healthpb.HealthCheckResponse_ServingStatus,
-	hs *health.Server) healthpb.HealthCheckResponse_ServingStatus {
+	hs *health.Server,
+) healthpb.HealthCheckResponse_ServingStatus {
 	pingCtx, cancel := context.WithTimeout(ctx, dbPingTimeout)
 	err := pool.Ping(pingCtx)
 	cancel()
