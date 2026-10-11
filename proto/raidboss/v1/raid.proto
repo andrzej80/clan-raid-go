@@ -2,9 +2,9 @@ syntax = "proto3";
 
 package raidboss.v1;
 
-option go_package = "github.com/andrzej80/clan-raid-go/gen/raidboss/v1;raidbossv1";
-
 import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/andrzej80/clan-raid-go/gen/raidboss/v1;raidbossv1";
 
 service RaidService {
   rpc CreateRaid(CreateRaidRequest) returns (CreateRaidResponse);
@@ -38,10 +38,16 @@ message CreateRaidRequest {
   int64 hp_max = 3;
   int32 duration_sec = 4;
 }
-message CreateRaidResponse { Raid raid = 1; }
+message CreateRaidResponse {
+  Raid raid = 1;
+}
 
-message GetRaidRequest { string raid_id = 1; }
-message GetRaidResponse { Raid raid = 1; }
+message GetRaidRequest {
+  string raid_id = 1;
+}
+message GetRaidResponse {
+  Raid raid = 1;
+}
 
 // Игрок берётся из metadata "x-player-id".
 message AttackRequest {
@@ -62,15 +68,19 @@ message LeaderboardEntry {
   int64 player_id = 1;
   int64 total_damage = 2;
 }
-message GetLeaderboardResponse { repeated LeaderboardEntry entries = 1; }
+message GetLeaderboardResponse {
+  repeated LeaderboardEntry entries = 1;
+}
 
-message WatchRaidRequest { string raid_id = 1; }
+message WatchRaidRequest {
+  string raid_id = 1;
+}
 message WatchRaidResponse {
   oneof update {
-    Raid snapshot = 1;                       // всегда первым сообщением
+    Raid snapshot = 1; // всегда первым сообщением
     int64 hp_left = 2;
     GetLeaderboardResponse leaderboard = 3;
-    RaidFinished finished = 4;               // последнее сообщение, затем сервер закрывает стрим
+    RaidFinished finished = 4; // последнее сообщение, затем сервер закрывает стрим
   }
 }
 message RaidFinished {
@@ -78,10 +88,14 @@ message RaidFinished {
   int64 killer_player_id = 2;
 }
 
-message ListRewardsRequest { int64 player_id = 1; }
+message ListRewardsRequest {
+  int64 player_id = 1;
+}
 message Reward {
   string raid_id = 1;
   string kind = 2;
   int32 amount = 3;
 }
-message ListRewardsResponse { repeated Reward rewards = 1; }
+message ListRewardsResponse {
+  repeated Reward rewards = 1;
+}
