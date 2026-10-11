@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Новый пуш в ту же ветку отменяет предыдущий прогон — не жжём раннеры на
+# промежуточных коммитах. Для main отмену не включаем: там каждый коммит важен.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: formats, lint, proto, build, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
+        check-latest: true
+    
+    - name: Run Buf Checks
+      uses: bufbuild/buf-action@v1
+      with:
+        breaking: false
+        pr_comment: false
+
+    - name: Install deps
+      run: |
+        go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+        go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+
+    - name: Check generated code is up to date
+      run: |
+        buf generate
+        if ! git diff --quiet -- gen/; then
+          echo "ОШИБКА: сгенерированный код разошёлся с .proto — запусти buf generate и закоммить:" >&2
+          git diff --name-status -- gen/ >&2
+          exit 1
+        fi
+
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v9
+      with:
+          version: v2.14.0
+
+    - name: build
+      run: go build ./...
+
+    - name: tests
+      run: go test -race ./...
+    
