@@ -35,6 +35,7 @@ jobs:
       uses: bufbuild/buf-action@v1
       with:
         breaking: false
+        comment: false
 
     - name: Install deps
       run: |
