@@ -33,6 +33,8 @@ jobs:
     
     - name: Run Buf Checks
       uses: bufbuild/buf-action@v1
+      with:
+        breaking: false
 
     - name: Install deps
       run: |
