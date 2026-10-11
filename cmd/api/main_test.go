@@ -107,6 +107,8 @@ func TestRaidServiceIsUnimplemented(t *testing.T) {
 }
 
 func TestCheckDbStatus(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name        string
 		startStatus healthpb.HealthCheckResponse_ServingStatus
