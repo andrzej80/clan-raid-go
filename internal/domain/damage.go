@@ -7,7 +7,7 @@ import (
 
 const (
 	critDamageMultiplier = 2
-	critChance           = 10
+	critChance           = 0.1
 	randomRange          = 10000000
 )
 
@@ -21,8 +21,7 @@ func CalcDamage(power int, u float64, isCrit bool) int {
 
 func RollHit(power int, rng *rand.Rand) (damage int, isCrit bool) {
 	u := 0.8 + 0.4*rng.Float64()
-	isCrit = false
-	if rng.Int64N(randomRange) <= randomRange/critChance {
+	if rng.Float64() < critChance {
 		isCrit = true
 	}
 	return CalcDamage(power, u, isCrit), isCrit

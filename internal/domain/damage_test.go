@@ -63,12 +63,11 @@ func TestRollHit_Determinism(t *testing.T) {
 }
 
 func TestRollHit_Statistics(t *testing.T) {
-	t.Parallel()
+
 	const (
 		power     = 100
-		seed      = 123456
 		totalHits = 100_000
-		tolerance = 100 // 1%
+		tolerance = 0.01 // 1%
 	)
 
 	expectedAverage := int(math.Round(1.1 * power))
@@ -76,6 +75,8 @@ func TestRollHit_Statistics(t *testing.T) {
 
 	var totalDamage int
 	var critCount int
+	seed := rand.Uint64()
+	t.Logf("seed=%d", seed)
 	pcg := rand.NewPCG(seed, 0)
 	r := rand.New(pcg)
 	for range totalHits {
@@ -100,16 +101,16 @@ func TestRollHit_Statistics(t *testing.T) {
 	actualAverage := totalDamage / totalHits
 	diff := max(actualAverage, expectedAverage) - min(actualAverage, expectedAverage)
 
-	if diff > expectedAverage/tolerance {
-		t.Errorf("Средний урон %d отклоняется от ожидаемого %d более чем на %d%% (разница: %.d%%)",
-			actualAverage, expectedAverage, tolerance/100, diff)
+	if diff > int(float64(expectedAverage)*tolerance) {
+		t.Errorf("Средний урон %d отклоняется от ожидаемого %d более чем на %.2f%% (разница: %.d%%)",
+			actualAverage, expectedAverage, tolerance, diff)
 	}
 
 	actualCritRate := float64(critCount) / float64(totalHits)
 	diffCrit := math.Abs(actualCritRate - expectedCritRate)
 
 	if diffCrit > tolerance {
-		t.Errorf("Доля критов %.2f%% отклоняется от ожидаемых %.2f%% (разница: %.2f%%)",
-			actualCritRate*100, expectedCritRate*100, diffCrit*100)
+		t.Errorf("Доля критов %.2f%% отклоняется от ожидаемых %.2f%% (разница: %.2f%%) tolerance %.2f%%",
+			actualCritRate*100, expectedCritRate*100, diffCrit*100, tolerance)
 	}
 }

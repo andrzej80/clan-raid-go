@@ -9,7 +9,7 @@ const (
 )
 
 type Reward struct {
-	playerID int
-	kind     RewardKind
-	amount   int
+	PlayerID int
+	Kind     RewardKind
+	Amount   int
 }
