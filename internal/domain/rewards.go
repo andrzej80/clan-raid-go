@@ -36,7 +36,7 @@ func addGeneralRewards(rewards *[]Reward, playersDamage map[int]int) {
 	for playerID, playerDamage := range playersDamage {
 		generalReward := Reward{
 			PlayerID: playerID,
-			Kind:     general,
+			Kind:     GeneralKind,
 			Amount:   generalRewardBonus + (1000 * playerDamage / totalDamage),
 		}
 		*rewards = append(*rewards, generalReward)
@@ -46,7 +46,7 @@ func addGeneralRewards(rewards *[]Reward, playersDamage map[int]int) {
 func addKillerRewards(rewards *[]Reward, killerID int) {
 	killerReward := Reward{
 		PlayerID: killerID,
-		Kind:     killer,
+		Kind:     KillerKind,
 		Amount:   killerReward,
 	}
 	*rewards = append(*rewards, killerReward)
@@ -57,7 +57,7 @@ func addTopRewards(rewards *[]Reward, playersDamage map[int]int) {
 	for place, playerID := range topPlayers {
 		topReward := Reward{
 			PlayerID: playerID,
-			Kind:     top,
+			Kind:     TopKind,
 			Amount:   topRewards[place],
 		}
 		*rewards = append(*rewards, topReward)

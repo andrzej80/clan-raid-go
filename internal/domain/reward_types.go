@@ -3,9 +3,9 @@ package domain
 type RewardKind string
 
 const (
-	general RewardKind = "participation"
-	top     RewardKind = "top3"
-	killer  RewardKind = "killing_blow"
+	GeneralKind RewardKind = "participation"
+	TopKind     RewardKind = "top3"
+	KillerKind  RewardKind = "killing_blow"
 )
 
 type Reward struct {

@@ -8,7 +8,6 @@ import (
 const (
 	critDamageMultiplier = 2
 	critChance           = 0.1
-	randomRange          = 10000000
 )
 
 func CalcDamage(power int, u float64, isCrit bool) int {

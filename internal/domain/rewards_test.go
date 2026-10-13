@@ -18,20 +18,20 @@ func TestCalcRewards(t *testing.T) {
 		{
 			name: "2 players", damageByUser: map[int]int{100: 70, 130: 30}, killerId: 130,
 			resultReward: []Reward{
-				{100, general, 800},
-				{130, general, 400},
-				{100, top, 500},
-				{130, top, 300},
-				{130, killer, 250},
+				{100, GeneralKind, 800},
+				{130, GeneralKind, 400},
+				{100, TopKind, 500},
+				{130, TopKind, 300},
+				{130, KillerKind, 250},
 			},
 		},
 		{
 			name: "killer not in list", damageByUser: map[int]int{100: 70, 130: 30}, killerId: 10,
 			resultReward: []Reward{
-				{100, general, 800},
-				{130, general, 400},
-				{100, top, 500},
-				{130, top, 300},
+				{100, GeneralKind, 800},
+				{130, GeneralKind, 400},
+				{100, TopKind, 500},
+				{130, TopKind, 300},
 			},
 		},
 	}
@@ -59,9 +59,9 @@ func TestAddTopRewards(t *testing.T) {
 		{
 			name: "same points", damageByUser: map[int]int{100: 70, 130: 30, 80: 30, 70: 30},
 			resultReward: []Reward{
-				{100, top, 500},
-				{70, top, 300},
-				{80, top, 200},
+				{100, TopKind, 500},
+				{70, TopKind, 300},
+				{80, TopKind, 200},
 			},
 		},
 		{
@@ -71,9 +71,9 @@ func TestAddTopRewards(t *testing.T) {
 		{
 			name: "same points", damageByUser: map[int]int{80: 30, 100: 70, 130: 30, 70: 30},
 			resultReward: []Reward{
-				{100, top, 500},
-				{70, top, 300},
-				{80, top, 200},
+				{100, TopKind, 500},
+				{70, TopKind, 300},
+				{80, TopKind, 200},
 			},
 		},
 	}
