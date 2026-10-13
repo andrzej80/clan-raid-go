@@ -63,7 +63,7 @@ func TestRollHit_Determinism(t *testing.T) {
 }
 
 func TestRollHit_Statistics(t *testing.T) {
-
+	t.Parallel()
 	const (
 		power     = 100
 		totalHits = 100_000
