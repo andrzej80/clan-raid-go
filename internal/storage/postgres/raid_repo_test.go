@@ -107,6 +107,8 @@ func newRaid(clanID int64) *domain.Raid {
 }
 
 func TestRaidRepo_CreateAndGet(t *testing.T) {
+	t.Parallel()
+
 	pool := requirePool(t)
 	repo := postgres.NewRaidRepo(pool)
 	ctx := context.Background()
@@ -129,6 +131,8 @@ func TestRaidRepo_CreateAndGet(t *testing.T) {
 }
 
 func TestRaidRepo_GetNotFound(t *testing.T) {
+	t.Parallel()
+
 	repo := postgres.NewRaidRepo(requirePool(t))
 
 	_, err := repo.GetRaid(context.Background(), uuid.New())
@@ -138,6 +142,8 @@ func TestRaidRepo_GetNotFound(t *testing.T) {
 }
 
 func TestRaidRepo_CreateUnknownClan(t *testing.T) {
+	t.Parallel()
+
 	repo := postgres.NewRaidRepo(requirePool(t))
 
 	err := repo.CreateRaid(context.Background(), newRaid(-1))
@@ -147,6 +153,8 @@ func TestRaidRepo_CreateUnknownClan(t *testing.T) {
 }
 
 func TestRaidRepo_SecondActiveRaidRejected(t *testing.T) {
+	t.Parallel()
+
 	pool := requirePool(t)
 	repo := postgres.NewRaidRepo(pool)
 	ctx := context.Background()
@@ -163,6 +171,8 @@ func TestRaidRepo_SecondActiveRaidRejected(t *testing.T) {
 
 // Критерий из README: 50 горутин на один клан — 1 успех и 49 ErrActiveRaidExists.
 func TestRaidRepo_ConcurrentCreateSameClan(t *testing.T) {
+	t.Parallel()
+
 	pool := requirePool(t)
 	repo := postgres.NewRaidRepo(pool)
 	clanID := createClan(t, pool)
@@ -198,6 +208,8 @@ func TestRaidRepo_ConcurrentCreateSameClan(t *testing.T) {
 }
 
 func TestTxManager_RollbackOnError(t *testing.T) {
+	t.Parallel()
+
 	pool := requirePool(t)
 	repo := postgres.NewRaidRepo(pool)
 	txm := postgres.NewTxManager(pool)
@@ -220,6 +232,8 @@ func TestTxManager_RollbackOnError(t *testing.T) {
 }
 
 func TestTxManager_CommitOnSuccess(t *testing.T) {
+	t.Parallel()
+
 	pool := requirePool(t)
 	repo := postgres.NewRaidRepo(pool)
 	txm := postgres.NewTxManager(pool)
