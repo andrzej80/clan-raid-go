@@ -1,4 +1,4 @@
-package postgres_test
+package pg_test
 
 import (
 	"context"
@@ -19,7 +19,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/andrzej80/clan-raid-go/internal/domain"
-	"github.com/andrzej80/clan-raid-go/internal/storage/postgres"
+	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
 )
 
 const migrationsDir = "../../../migrations"
@@ -53,7 +53,7 @@ func run(m *testing.M) int {
 		fmt.Fprintln(os.Stderr, "connection string:", err)
 		return 1
 	}
-	testPool, err = postgres.NewPool(ctx, &postgres.DbConfig{Dsn: dsn, MaxConns: 20})
+	testPool, err = pg.NewPool(ctx, &pg.DbConfig{Dsn: dsn, MaxConns: 20})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "new pool:", err)
 		return 1
@@ -110,7 +110,7 @@ func TestRaidRepo_CreateAndGet(t *testing.T) {
 	t.Parallel()
 
 	pool := requirePool(t)
-	repo := postgres.NewRaidRepo(pool)
+	repo := pg.NewRaidRepo(pool)
 	ctx := context.Background()
 
 	want := newRaid(createClan(t, pool))
@@ -133,7 +133,7 @@ func TestRaidRepo_CreateAndGet(t *testing.T) {
 func TestRaidRepo_GetNotFound(t *testing.T) {
 	t.Parallel()
 
-	repo := postgres.NewRaidRepo(requirePool(t))
+	repo := pg.NewRaidRepo(requirePool(t))
 
 	_, err := repo.GetRaid(context.Background(), uuid.New())
 	if !errors.Is(err, domain.ErrRaidNotFound) {
@@ -144,7 +144,7 @@ func TestRaidRepo_GetNotFound(t *testing.T) {
 func TestRaidRepo_CreateUnknownClan(t *testing.T) {
 	t.Parallel()
 
-	repo := postgres.NewRaidRepo(requirePool(t))
+	repo := pg.NewRaidRepo(requirePool(t))
 
 	err := repo.CreateRaid(context.Background(), newRaid(-1))
 	if !errors.Is(err, domain.ErrClanNotFound) {
@@ -156,7 +156,7 @@ func TestRaidRepo_SecondActiveRaidRejected(t *testing.T) {
 	t.Parallel()
 
 	pool := requirePool(t)
-	repo := postgres.NewRaidRepo(pool)
+	repo := pg.NewRaidRepo(pool)
 	ctx := context.Background()
 	clanID := createClan(t, pool)
 
@@ -174,7 +174,7 @@ func TestRaidRepo_ConcurrentCreateSameClan(t *testing.T) {
 	t.Parallel()
 
 	pool := requirePool(t)
-	repo := postgres.NewRaidRepo(pool)
+	repo := pg.NewRaidRepo(pool)
 	clanID := createClan(t, pool)
 
 	const workers = 50
@@ -211,8 +211,8 @@ func TestTxManager_RollbackOnError(t *testing.T) {
 	t.Parallel()
 
 	pool := requirePool(t)
-	repo := postgres.NewRaidRepo(pool)
-	txm := postgres.NewTxManager(pool)
+	repo := pg.NewRaidRepo(pool)
+	txm := pg.NewTxManager(pool)
 	ctx := context.Background()
 
 	raid := newRaid(createClan(t, pool))
@@ -235,8 +235,8 @@ func TestTxManager_CommitOnSuccess(t *testing.T) {
 	t.Parallel()
 
 	pool := requirePool(t)
-	repo := postgres.NewRaidRepo(pool)
-	txm := postgres.NewTxManager(pool)
+	repo := pg.NewRaidRepo(pool)
+	txm := pg.NewTxManager(pool)
 	ctx := context.Background()
 
 	raid := newRaid(createClan(t, pool))

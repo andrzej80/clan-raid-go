@@ -2,13 +2,11 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -20,36 +18,28 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	raidbossV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/v1"
+	"github.com/andrzej80/clan-raid-go/internal/config"
 	"github.com/andrzej80/clan-raid-go/internal/grpcapi"
 	"github.com/andrzej80/clan-raid-go/internal/interceptors"
-	"github.com/andrzej80/clan-raid-go/internal/storage/postgres"
+	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
 	"github.com/andrzej80/clan-raid-go/internal/telemetry"
 )
 
 const (
-	shutdownTimeout        = 10 * time.Second
-	healthCheckInterval    = 2 * time.Second
-	dbPingTimeout          = 500 * time.Millisecond
-	defaultMaxConns        = 5
-	defaultMinConns        = 0
-	defaultMaxConnIdleTime = 5 * time.Minute
-	defaultMaxConnLifetime = 30 * time.Minute
+	shutdownTimeout     = 10 * time.Second
+	healthCheckInterval = 2 * time.Second
+	dbPingTimeout       = 500 * time.Millisecond
 )
 
 type pinger interface {
 	Ping(ctx context.Context) error
 }
 
-type Config struct {
-	gRPCAddr       string
-	gRPCReflection bool
-}
-
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	cfg, err := loadConfig()
+	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
@@ -60,10 +50,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("gRPC server stopped", "port", cfg.gRPCAddr, "isDevMode", cfg.gRPCReflection)
+	slog.Info("gRPC server stopped", "port", cfg.GRPCAddr, "isDevMode", cfg.GRPCReflection)
 }
 
-func run(cfg *Config) error {
+func run(cfg *config.Config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	shutdownTelemetry, err := telemetry.Setup(ctx)
@@ -78,18 +68,14 @@ func run(cfg *Config) error {
 		}
 	}()
 
-	dbCfg, err := loadDbConfig()
-	if err != nil {
-		return err
-	}
-	dbPool, err := postgres.NewPool(ctx, dbCfg)
+	dbPool, err := pg.NewPool(ctx, &cfg.DB)
 	if err != nil {
 		return err
 	}
 	defer dbPool.Close()
 
-	raidRepo := postgres.NewRaidRepo(dbPool)
-	txManager := postgres.NewTxManager(dbPool)
+	raidRepo := pg.NewRaidRepo(dbPool)
+	txManager := pg.NewTxManager(dbPool)
 	service := grpcapi.NewRaidService(raidRepo, txManager)
 
 	srv, lis, err := initGRPCServer(ctx, cfg, service)
@@ -106,7 +92,7 @@ func run(cfg *Config) error {
 	errCh := make(chan error, 1)
 
 	go func() {
-		slog.Info("gRPC server listening", "addr", cfg.gRPCAddr)
+		slog.Info("gRPC server listening", "addr", cfg.GRPCAddr)
 		errCh <- srv.Serve(lis)
 	}()
 
@@ -175,91 +161,16 @@ func checkDbStatus(ctx context.Context,
 	return lastStatus
 }
 
-func loadConfig() (*Config, error) {
-	host := os.Getenv("APP_HOST")
-	appPort := os.Getenv("APP_PORT")
-	if appPort == "" {
-		appPort = "9090"
-	}
-	numericPort, err := strconv.Atoi(appPort)
-	if err != nil {
-		return nil, fmt.Errorf("invalid APP_PORT %q: %w", appPort, err)
-	}
-	if numericPort > 65535 || numericPort < 1 {
-		return nil, fmt.Errorf("APP_PORT %d out of range 1..65535", numericPort)
-	}
-	cfg := &Config{
-		gRPCAddr:       net.JoinHostPort(host, appPort),
-		gRPCReflection: false,
-	}
-
-	isDevMode := os.Getenv("GRPC_REFLECTION")
-	if isDevMode == "" {
-		cfg.gRPCReflection = false
-	} else {
-		parsed, err := strconv.ParseBool(isDevMode)
-		if err != nil {
-			return nil, fmt.Errorf("invalid GRPC_REFLECTION %q: %w", isDevMode, err)
-		}
-		cfg.gRPCReflection = parsed
-	}
-	return cfg, nil
-}
-
-func loadDbConfig() (*postgres.DbConfig, error) {
-	dbUrl := os.Getenv("DATABASE_URL")
-	if dbUrl == "" {
-		return nil, errors.New("invalid DATABASE_URL")
-	}
-
-	cfg := &postgres.DbConfig{
-		Dsn:             dbUrl,
-		MaxConns:        getEnvInt("PG_MAX_CONNS", defaultMaxConns),
-		MinConns:        getEnvInt("PG_MIN_CONNS", defaultMinConns),
-		MaxConnIdleTime: getEnvDuration("PG_MAX_CONN_IDLE_TIME", defaultMaxConnIdleTime),
-		MaxConnLifetime: getEnvDuration("PG_MAX_CONN_LIFETIME", defaultMaxConnLifetime),
-	}
-	return cfg, nil
-}
-
-func getEnvInt(key string, defaultValue int32) int32 {
-	fromEnv := os.Getenv(key)
-	if fromEnv == "" {
-		slog.Warn("Value is set to default", "valueName", key)
-		return defaultValue
-	}
-	parsedValue, err := strconv.ParseInt(fromEnv, 10, 32)
-	if err != nil {
-		slog.Warn("Value is set to default", "valueName", key, "rawData", fromEnv)
-		return defaultValue
-	}
-	return int32(parsedValue)
-}
-
-func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
-	fromEnv := os.Getenv(key)
-	if fromEnv == "" {
-		slog.Warn("Value is set to default", "valueName", key)
-		return defaultValue
-	}
-	parsedValue, err := time.ParseDuration(fromEnv)
-	if err != nil {
-		slog.Warn("Value is set to default", "valueName", key, "rawData", fromEnv)
-		return defaultValue
-	}
-	return parsedValue
-}
-
 func initGRPCServer(
 	ctx context.Context,
-	configParams *Config,
+	configParams *config.Config,
 	service raidbossV1.RaidServiceServer,
 ) (*grpc.Server, net.Listener, error) {
 	// ListenConfig, а не net.Listen: слушающий сокет тоже создается в контексте
 	// (его можно отменить, пока резолвится адрес). Этого требует линтер noctx.
 	var lc net.ListenConfig
 
-	lis, err := lc.Listen(ctx, "tcp", configParams.gRPCAddr)
+	lis, err := lc.Listen(ctx, "tcp", configParams.GRPCAddr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to listen: %w", err)
 	}
@@ -269,7 +180,7 @@ func initGRPCServer(
 
 func newGRPCServer(
 	service raidbossV1.RaidServiceServer,
-	configParams *Config,
+	configParams *config.Config,
 ) *grpc.Server {
 	s := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
@@ -278,7 +189,7 @@ func newGRPCServer(
 	)
 
 	raidbossV1.RegisterRaidServiceServer(s, service)
-	if configParams.gRPCReflection {
+	if configParams.GRPCReflection {
 		slog.Info("Reflection is on: ✅")
 		reflection.Register(s)
 	}
