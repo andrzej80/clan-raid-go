@@ -33,8 +33,11 @@ func (r *RaidRepo) CreateRaid(ctx context.Context, raid *domain.Raid) error {
 		raid.StartedAt, raid.EndsAt, raid.FinishedAt, raid.KillerPlayerID, raid.KillerHitID,
 	)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if isViolation(err, pgUniqueViolation, constraintOneActiveRaidPerClan) {
 			return domain.ErrActiveRaidExists
+		}
+		if isViolation(err, pgForeignKeyViolation, constraintRaidsClanFK) {
+			return domain.ErrClanNotFound
 		}
 		return fmt.Errorf("insert raid: %w", err)
 	}

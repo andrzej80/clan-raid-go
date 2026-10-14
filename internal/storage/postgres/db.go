@@ -9,7 +9,16 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const pgUniqueViolation = "23505"
+const (
+	pgUniqueViolation     = "23505"
+	pgForeignKeyViolation = "23503"
+)
+
+// Имена ограничений из миграций.
+const (
+	constraintOneActiveRaidPerClan = "raids_one_active_per_clan"
+	constraintRaidsClanFK          = "raids_clan_id_fkey"
+)
 
 // dbtx — общий интерфейс для *pgxpool.Pool и pgx.Tx.
 type dbtx interface {
@@ -28,7 +37,8 @@ func conn(ctx context.Context, pool *pgxpool.Pool) dbtx {
 	return pool
 }
 
-func isUniqueViolation(err error) bool {
+// isViolation сообщает, что err — ошибка Postgres с кодом code на ограничении constraint.
+func isViolation(err error, code, constraint string) bool {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation
+	return errors.As(err, &pgErr) && pgErr.Code == code && pgErr.ConstraintName == constraint
 }

@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	raidbossV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/v1"
+	"github.com/andrzej80/clan-raid-go/internal/grpcapi"
 )
 
 type fakePinger struct{ err error }
@@ -75,7 +76,7 @@ func startTestServer(t *testing.T, cfg *Config) *grpc.ClientConn {
 	t.Helper()
 
 	lis := bufconn.Listen(1024 * 1024)
-	srv := newGRPCServer(newRaidService(), cfg)
+	srv := newGRPCServer(grpcapi.NewRaidService(nil, nil), cfg)
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
@@ -100,9 +101,9 @@ func TestRaidServiceIsUnimplemented(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	_, err := raidbossV1.NewRaidServiceClient(conn).GetRaid(ctx, &raidbossV1.GetRaidRequest{})
+	_, err := raidbossV1.NewRaidServiceClient(conn).Attack(ctx, &raidbossV1.AttackRequest{})
 	if got := status.Code(err); got != codes.Unimplemented {
-		t.Fatalf("GetRaid code = %v, want %v (err: %v)", got, codes.Unimplemented, err)
+		t.Fatalf("Attack code = %v, want %v (err: %v)", got, codes.Unimplemented, err)
 	}
 }
 

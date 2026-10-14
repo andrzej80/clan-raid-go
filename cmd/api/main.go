@@ -20,6 +20,8 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	raidbossV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/v1"
+	"github.com/andrzej80/clan-raid-go/internal/grpcapi"
+	"github.com/andrzej80/clan-raid-go/internal/interceptors"
 	"github.com/andrzej80/clan-raid-go/internal/storage/postgres"
 	"github.com/andrzej80/clan-raid-go/internal/telemetry"
 )
@@ -41,10 +43,6 @@ type pinger interface {
 type Config struct {
 	gRPCAddr       string
 	gRPCReflection bool
-}
-
-type raidService struct {
-	raidbossV1.UnimplementedRaidServiceServer
 }
 
 func main() {
@@ -90,7 +88,9 @@ func run(cfg *Config) error {
 	}
 	defer dbPool.Close()
 
-	service := newRaidService()
+	raidRepo := postgres.NewRaidRepo(dbPool)
+	txManager := postgres.NewTxManager(dbPool)
+	service := grpcapi.NewRaidService(raidRepo, txManager)
 
 	srv, lis, err := initGRPCServer(ctx, cfg, service)
 	if err != nil {
@@ -173,10 +173,6 @@ func checkDbStatus(ctx context.Context,
 		slog.Warn("Health status changed", "current", currentStatus)
 	}
 	return lastStatus
-}
-
-func newRaidService() *raidService {
-	return &raidService{}
 }
 
 func loadConfig() (*Config, error) {
@@ -277,6 +273,8 @@ func newGRPCServer(
 ) *grpc.Server {
 	s := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+		grpc.ChainUnaryInterceptor(interceptors.UnaryErrorMapper),
+		grpc.ChainStreamInterceptor(interceptors.StreamErrorMapper),
 	)
 
 	raidbossV1.RegisterRaidServiceServer(s, service)
