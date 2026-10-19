@@ -9,6 +9,10 @@ import (
 	"strconv"
 	"time"
 
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	reflectionv1 "google.golang.org/grpc/reflection/grpc_reflection_v1"
+	reflectionv1alpha "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
+
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
 )
 
@@ -23,6 +27,18 @@ type Config struct {
 	GRPCAddr       string
 	GRPCReflection bool
 	DB             pg.DbConfig
+}
+
+// PublicServices — сервисы, которым не нужна авторизация
+func (c *Config) PublicServices() []string {
+	services := []string{healthpb.Health_ServiceDesc.ServiceName}
+	if c.GRPCReflection {
+		services = append(services,
+			reflectionv1.ServerReflection_ServiceDesc.ServiceName,
+			reflectionv1alpha.ServerReflection_ServiceDesc.ServiceName,
+		)
+	}
+	return services
 }
 
 func Load() (*Config, error) {

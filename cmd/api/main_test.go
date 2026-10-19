@@ -12,12 +12,14 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	raidbossV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/v1"
 	"github.com/andrzej80/clan-raid-go/internal/config"
 	"github.com/andrzej80/clan-raid-go/internal/grpcapi"
+	"github.com/andrzej80/clan-raid-go/internal/interceptors"
 )
 
 type fakePinger struct{ err error }
@@ -27,7 +29,7 @@ func (f fakePinger) Ping(context.Context) error { return f.err }
 func startTestServer(t *testing.T, cfg *config.Config) *grpc.ClientConn {
 	t.Helper()
 
-	return startTestServerWith(t, cfg, grpcapi.NewRaidService(nil, nil))
+	return startTestServerWith(t, cfg, grpcapi.NewRaidService(nil))
 }
 
 func startTestServerWith(t *testing.T, cfg *config.Config, svc raidbossV1.RaidServiceServer) *grpc.ClientConn {
@@ -59,9 +61,23 @@ func TestRaidServiceIsUnimplemented(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
+	ctx = metadata.AppendToOutgoingContext(ctx, interceptors.PlayerIDHeader, "1")
 	_, err := raidbossV1.NewRaidServiceClient(conn).Attack(ctx, &raidbossV1.AttackRequest{})
 	if got := status.Code(err); got != codes.Unimplemented {
 		t.Fatalf("Attack code = %v, want %v (err: %v)", got, codes.Unimplemented, err)
+	}
+}
+
+func TestAttackRequiresPlayerID(t *testing.T) {
+	t.Parallel()
+
+	conn := startTestServer(t, &config.Config{})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err := raidbossV1.NewRaidServiceClient(conn).Attack(ctx, &raidbossV1.AttackRequest{})
+	if got := status.Code(err); got != codes.Unauthenticated {
+		t.Fatalf("Attack code = %v, want %v (err: %v)", got, codes.Unauthenticated, err)
 	}
 }
 

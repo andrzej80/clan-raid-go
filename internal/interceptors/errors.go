@@ -44,6 +44,8 @@ func toStatus(err error) error {
 	switch {
 	case errors.Is(err, domain.ErrRaidNotFound), errors.Is(err, domain.ErrClanNotFound):
 		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, domain.ErrInvalidArgument):
+		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, domain.ErrActiveRaidExists):
 		return status.Error(codes.AlreadyExists, err.Error())
 	case errors.Is(err, context.DeadlineExceeded):

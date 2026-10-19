@@ -24,6 +24,7 @@ func TestToStatus(t *testing.T) {
 		{"not found", domain.ErrRaidNotFound, codes.NotFound},
 		{"wrapped not found", fmt.Errorf("get: %w", domain.ErrRaidNotFound), codes.NotFound},
 		{"clan not found", domain.ErrClanNotFound, codes.NotFound},
+		{"invalid argument", fmt.Errorf("%w: hp_max must be positive", domain.ErrInvalidArgument), codes.InvalidArgument},
 		{"already exists", domain.ErrActiveRaidExists, codes.AlreadyExists},
 		{"deadline", context.DeadlineExceeded, codes.DeadlineExceeded},
 		{"canceled", context.Canceled, codes.Canceled},

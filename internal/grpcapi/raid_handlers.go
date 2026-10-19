@@ -11,38 +11,20 @@ import (
 
 	raidbossV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/v1"
 	"github.com/andrzej80/clan-raid-go/internal/domain"
+	raidsvc "github.com/andrzej80/clan-raid-go/internal/raid"
 )
 
 func (s *RaidService) CreateRaid(
 	ctx context.Context,
 	req *raidbossV1.CreateRaidRequest,
 ) (*raidbossV1.CreateRaidResponse, error) {
-	if req.GetClanId() <= 0 {
-		return nil, status.Error(codes.InvalidArgument, "clan_id must be positive")
-	}
-	if req.GetBossName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "boss_name is required")
-	}
-	if req.GetHpMax() <= 0 {
-		return nil, status.Error(codes.InvalidArgument, "hp_max must be positive")
-	}
-	if req.GetDurationSec() <= 0 {
-		return nil, status.Error(codes.InvalidArgument, "duration_sec must be positive")
-	}
-
-	now := time.Now().UTC()
-	raid := &domain.Raid{
-		ID:        uuid.New(),
-		ClanID:    req.GetClanId(),
-		BossName:  req.GetBossName(),
-		HPMax:     req.GetHpMax(),
-		HPLeft:    req.GetHpMax(),
-		Status:    domain.RaidActive,
-		StartedAt: now,
-		EndsAt:    now.Add(time.Duration(req.GetDurationSec()) * time.Second),
-	}
-
-	if err := s.raids.CreateRaid(ctx, raid); err != nil {
+	raid, err := s.raids.Create(ctx, raidsvc.CreateParams{
+		ClanID:   req.GetClanId(),
+		BossName: req.GetBossName(),
+		HPMax:    req.GetHpMax(),
+		Duration: time.Duration(req.GetDurationSec()) * time.Second,
+	})
+	if err != nil {
 		return nil, err
 	}
 	return &raidbossV1.CreateRaidResponse{Raid: raidToProto(raid)}, nil
@@ -57,7 +39,7 @@ func (s *RaidService) GetRaid(
 		return nil, status.Error(codes.InvalidArgument, "raid_id must be a valid UUID")
 	}
 
-	raid, err := s.raids.GetRaid(ctx, id)
+	raid, err := s.raids.Get(ctx, id)
 	if err != nil {
 		return nil, err
 	}

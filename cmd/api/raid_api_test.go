@@ -11,12 +11,15 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	raidbossV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/v1"
 	"github.com/andrzej80/clan-raid-go/internal/config"
 	"github.com/andrzej80/clan-raid-go/internal/domain"
 	"github.com/andrzej80/clan-raid-go/internal/grpcapi"
+	"github.com/andrzej80/clan-raid-go/internal/interceptors"
+	"github.com/andrzej80/clan-raid-go/internal/raid"
 )
 
 // fakeRaids — in-memory реализация domain.RaidRepository с теми же правилами, что и в БД:
@@ -72,7 +75,7 @@ func (f *fakeRaids) GetRaid(_ context.Context, id uuid.UUID) (*domain.Raid, erro
 func newRaidClient(t *testing.T, repo domain.RaidRepository) raidbossV1.RaidServiceClient {
 	t.Helper()
 
-	conn := startTestServerWith(t, &config.Config{}, grpcapi.NewRaidService(repo, nil))
+	conn := startTestServerWith(t, &config.Config{}, grpcapi.NewRaidService(raid.NewService(repo)))
 	return raidbossV1.NewRaidServiceClient(conn)
 }
 
@@ -91,7 +94,7 @@ func testCtx(t *testing.T) context.Context {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
-	return ctx
+	return metadata.AppendToOutgoingContext(ctx, interceptors.PlayerIDHeader, "1")
 }
 
 func TestAPI_CreateAndGetRaid(t *testing.T) {

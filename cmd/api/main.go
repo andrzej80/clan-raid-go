@@ -21,6 +21,7 @@ import (
 	"github.com/andrzej80/clan-raid-go/internal/config"
 	"github.com/andrzej80/clan-raid-go/internal/grpcapi"
 	"github.com/andrzej80/clan-raid-go/internal/interceptors"
+	"github.com/andrzej80/clan-raid-go/internal/raid"
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
 	"github.com/andrzej80/clan-raid-go/internal/telemetry"
 )
@@ -75,8 +76,7 @@ func run(cfg *config.Config) error {
 	defer dbPool.Close()
 
 	raidRepo := pg.NewRaidRepo(dbPool)
-	txManager := pg.NewTxManager(dbPool)
-	service := grpcapi.NewRaidService(raidRepo, txManager)
+	service := grpcapi.NewRaidService(raid.NewService(raidRepo))
 
 	srv, lis, err := initGRPCServer(ctx, cfg, service)
 	if err != nil {
@@ -182,10 +182,22 @@ func newGRPCServer(
 	service raidbossV1.RaidServiceServer,
 	configParams *config.Config,
 ) *grpc.Server {
+	auth := interceptors.NewAuth(configParams.PublicServices()...)
 	s := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-		grpc.ChainUnaryInterceptor(interceptors.UnaryErrorMapper),
-		grpc.ChainStreamInterceptor(interceptors.StreamErrorMapper),
+		// logging снаружи recovery: паника превращается в INTERNAL и попадает в лог вызова.
+		grpc.ChainUnaryInterceptor(
+			interceptors.UnaryLogging,
+			interceptors.UnaryRecovery,
+			auth.Unary(),
+			interceptors.UnaryErrorMapper,
+		),
+		grpc.ChainStreamInterceptor(
+			interceptors.StreamLogging,
+			interceptors.StreamRecovery,
+			auth.Stream(),
+			interceptors.StreamErrorMapper,
+		),
 	)
 
 	raidbossV1.RegisterRaidServiceServer(s, service)
