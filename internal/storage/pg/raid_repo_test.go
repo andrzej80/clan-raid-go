@@ -43,6 +43,11 @@ func run(m *testing.M) int {
 				WithOccurrence(2).WithStartupTimeout(60*time.Second)),
 	)
 	if err != nil {
+		// В CI Docker обязателен: иначе интеграционные тесты молча пропустятся, а сборка останется зелёной.
+		if os.Getenv("REQUIRE_DOCKER") == "true" {
+			fmt.Fprintln(os.Stderr, "postgres container unavailable, but REQUIRE_DOCKER=true:", err)
+			return 1
+		}
 		fmt.Fprintln(os.Stderr, "postgres container unavailable, integration tests will be skipped:", err)
 		return m.Run()
 	}

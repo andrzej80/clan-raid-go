@@ -34,6 +34,44 @@ func TestCalcRewards(t *testing.T) {
 				{130, TopKind, 300},
 			},
 		},
+		{
+			name: "empty damage", damageByUser: map[int]int{}, killerId: 1,
+			resultReward: []Reward{},
+		},
+		{
+			name: "single player is also killer", damageByUser: map[int]int{7: 50}, killerId: 7,
+			resultReward: []Reward{
+				{7, GeneralKind, 1100},
+				{7, TopKind, 500},
+				{7, KillerKind, 250},
+			},
+		},
+		{
+			// 1000*1/3 = 333.33 -> floor 333; при равном уроне места по возрастанию id
+			name: "participation is floored", damageByUser: map[int]int{1: 1, 2: 1, 3: 1}, killerId: 2,
+			resultReward: []Reward{
+				{1, GeneralKind, 433},
+				{2, GeneralKind, 433},
+				{3, GeneralKind, 433},
+				{1, TopKind, 500},
+				{2, TopKind, 300},
+				{3, TopKind, 200},
+				{2, KillerKind, 250},
+			},
+		},
+		{
+			name: "top3 only for three players", damageByUser: map[int]int{1: 40, 2: 30, 3: 20, 4: 10}, killerId: 4,
+			resultReward: []Reward{
+				{1, GeneralKind, 500},
+				{2, GeneralKind, 400},
+				{3, GeneralKind, 300},
+				{4, GeneralKind, 200},
+				{1, TopKind, 500},
+				{2, TopKind, 300},
+				{3, TopKind, 200},
+				{4, KillerKind, 250},
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

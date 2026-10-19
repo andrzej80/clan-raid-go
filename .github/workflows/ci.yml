@@ -34,7 +34,7 @@ jobs:
     - name: Run Buf Checks
       uses: bufbuild/buf-action@v1
       with:
-        breaking: false
+        breaking: true
         pr_comment: false
 
     - name: Install deps
@@ -60,5 +60,6 @@ jobs:
       run: go build ./...
 
     - name: tests
+      env:
+        REQUIRE_DOCKER: "true"
       run: go test -race ./...
-    
