@@ -2,6 +2,7 @@ package pg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -18,7 +19,12 @@ func NewCatalogRepo(pool *pgxpool.Pool) *CatalogRepo {
 	return &CatalogRepo{pool: pool}
 }
 
-var _ domain.CatalogRepository = (*CatalogRepo)(nil)
+var (
+	_ domain.CatalogRepository = (*CatalogRepo)(nil)
+	_ domain.PlayerReader      = (*CatalogRepo)(nil)
+)
+
+const playerColumns = `id, clan_id, name, power`
 
 func (r *CatalogRepo) CreateClans(ctx context.Context, names []string) ([]int64, error) {
 	// unnest ... WITH ORDINALITY сохраняет порядок: RETURNING идёт в порядке вставки строк.
@@ -57,4 +63,20 @@ func (r *CatalogRepo) CreatePlayers(ctx context.Context, players []domain.Player
 		return fmt.Errorf("copy players: %w", err)
 	}
 	return nil
+}
+
+func (r *CatalogRepo) GetPlayer(ctx context.Context, id int64) (*domain.Player, error) {
+	var player domain.Player
+	err := conn(ctx, r.pool).QueryRow(ctx,
+		`SELECT `+playerColumns+` FROM players WHERE id = $1`, id,
+	).Scan(
+		&player.ID, &player.ClanID, &player.Name, &player.Power,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, domain.ErrPlayerNotFound
+		}
+		return nil, fmt.Errorf("get player: %w", err)
+	}
+	return &player, nil
 }
