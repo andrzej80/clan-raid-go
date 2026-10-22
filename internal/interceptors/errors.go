@@ -42,8 +42,17 @@ func toStatus(err error) error {
 	}
 
 	switch {
-	case errors.Is(err, domain.ErrRaidNotFound), errors.Is(err, domain.ErrClanNotFound):
+	case errors.Is(err, domain.ErrRaidNotFound),
+		errors.Is(err, domain.ErrClanNotFound),
+		errors.Is(err, domain.ErrPlayerNotFound):
 		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, domain.ErrWrongClan):
+		return status.Error(codes.PermissionDenied, domain.ErrWrongClan.Error())
+	case errors.Is(err, domain.ErrRaidNotActive):
+		return status.Error(codes.FailedPrecondition, domain.ErrRaidNotActive.Error())
+	case errors.Is(err, domain.ErrQueueUnavailable):
+		// Текст фиксированный: детали брокера клиенту не нужны, они в логе сервиса.
+		return status.Error(codes.Unavailable, domain.ErrQueueUnavailable.Error())
 	case errors.Is(err, domain.ErrInvalidArgument):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, domain.ErrActiveRaidExists):
