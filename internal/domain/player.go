@@ -21,3 +21,8 @@ type CatalogRepository interface {
 	// CreatePlayers создаёт игроков пачкой; ID в переданных значениях игнорируется.
 	CreatePlayers(ctx context.Context, players []Player) error
 }
+
+type PlayerReader interface {
+	// GetPlayer получаем информацию о игроке и клане
+	GetPlayer(ctx context.Context, id int64) (*Player, error)
+}

@@ -2,11 +2,34 @@ package pg_test
 
 import (
 	"context"
+	"errors"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/andrzej80/clan-raid-go/internal/domain"
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
 )
+
+func createPlayer(t *testing.T, pool *pgxpool.Pool, clanID int64, power int) (int64, string) {
+	t.Helper()
+	var id int64
+	err := pool.QueryRow(context.Background(),
+		`INSERT INTO players (clan_id, name, power) VALUES ($1,$2,$3) RETURNING id`, clanID, t.Name(), power).Scan(&id)
+	if err != nil {
+		t.Fatalf("create player: %v", err)
+	}
+	return id, t.Name()
+}
+
+func newPlayer(playerID, clanID int64, power int, name string) *domain.Player {
+	return &domain.Player{
+		ID:     playerID,
+		ClanID: clanID,
+		Name:   name,
+		Power:  power,
+	}
+}
 
 func TestCatalogRepo_CreateClansKeepsOrder(t *testing.T) {
 	t.Parallel()
@@ -103,5 +126,36 @@ func TestCatalogRepo_RollbackWithTx(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("clan must be rolled back, found %d", n)
+	}
+}
+
+func TestCatalogRepo_GetPlayer(t *testing.T) {
+	t.Parallel()
+
+	pool := requirePool(t)
+	repo := pg.NewCatalogRepo(pool)
+	ctx := context.Background()
+	clanId := createClan(t, pool)
+	power := 300
+	playerId, name := createPlayer(t, pool, clanId, power)
+	want := newPlayer(playerId, clanId, power, name)
+
+	got, err := repo.GetPlayer(ctx, want.ID)
+	if err != nil {
+		t.Fatalf("GetPlayer: %v", err)
+	}
+	if got.ID != want.ID || got.ClanID != want.ClanID || got.Name != want.Name || got.Power != want.Power {
+		t.Fatalf("player mismatch:\n got  %+v\n want %+v", got, want)
+	}
+}
+
+func TestCatalogRepo_GetPlayerNotFound(t *testing.T) {
+	t.Parallel()
+
+	repo := pg.NewCatalogRepo(requirePool(t))
+
+	_, err := repo.GetPlayer(context.Background(), 999999999)
+	if !errors.Is(err, domain.ErrPlayerNotFound) {
+		t.Fatalf("err = %v, want ErrPlayerNotFound", err)
 	}
 }

@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package raidboss.events.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/andrzej80/clan-raid-go/gen/raidboss/events/v1;eventsv1";
+
+message HitEvent {
+  string hit_id = 1;
+  string raid_id = 2;
+  int64 player_id = 3;
+  int64 clan_id = 4;
+  int32 damage = 5;
+  bool is_crit = 6;
+  google.protobuf.Timestamp created_at = 7;
+}
+
+// Конверт: в одном топике несколько типов событий одного рейда.
+message RaidEvent {
+  string raid_id = 1;
+  google.protobuf.Timestamp occurred_at = 2;
+  oneof event {
+    RaidDefeated defeated = 3;
+    RaidExpired expired = 4;
+  }
+}
+message RaidDefeated {
+  int64 killer_player_id = 1;
+  string killer_hit_id = 2;
+}
+message RaidExpired {
+  int64 hp_left = 1;
+}
+
+message RewardGranted {
+  string raid_id = 1;
+  int64 player_id = 2;
+  string kind = 3;
+  int32 amount = 4;
+}

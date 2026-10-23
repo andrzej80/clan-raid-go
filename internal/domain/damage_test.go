@@ -4,6 +4,8 @@ import (
 	"math"
 	"math/rand/v2"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func TestCalcDamage(t *testing.T) {
@@ -112,5 +114,53 @@ func TestRollHit_Statistics(t *testing.T) {
 	if diffCrit > tolerance {
 		t.Errorf("Доля критов %.2f%% отклоняется от ожидаемых %.2f%% (разница: %.2f%%) tolerance %.2f%%",
 			actualCritRate*100, expectedCritRate*100, diffCrit*100, tolerance)
+	}
+}
+
+func TestRollHitForKey_SameKeySameHit(t *testing.T) {
+	t.Parallel()
+
+	for range 100 {
+		key := uuid.New()
+		dmg1, crit1 := RollHitForKey(500, key)
+		dmg2, crit2 := RollHitForKey(500, key)
+		if dmg1 != dmg2 || crit1 != crit2 {
+			t.Fatalf("key %s: (%d, %t) then (%d, %t), retry must give the same hit", key, dmg1, crit1, dmg2, crit2)
+		}
+	}
+}
+
+func TestRollHitForKey_Distribution(t *testing.T) {
+	t.Parallel()
+
+	const (
+		power = 500
+		n     = 50000
+	)
+	var (
+		crits int
+		sum   float64
+	)
+	for range n {
+		dmg, isCrit := RollHitForKey(power, uuid.New())
+		lo, hi := 0.8*power, 1.2*power
+		if isCrit {
+			lo, hi = 2*lo, 2*hi
+		}
+		if float64(dmg) < math.Floor(lo) || float64(dmg) > math.Ceil(hi) {
+			t.Fatalf("damage %d (crit=%t) out of [%v, %v]", dmg, isCrit, lo, hi)
+		}
+		if isCrit {
+			crits++
+		}
+		sum += float64(dmg)
+	}
+
+	if rate := float64(crits) / n; math.Abs(rate-0.1) > 0.01 {
+		t.Fatalf("crit rate = %.4f, want about 0.10", rate)
+	}
+	// Средний урон с учётом критов — power × 1.1.
+	if avg := sum / n; math.Abs(avg-power*1.1) > power*1.1*0.01 {
+		t.Fatalf("average damage = %.1f, want about %.1f", avg, power*1.1)
 	}
 }

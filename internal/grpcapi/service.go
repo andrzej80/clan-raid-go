@@ -16,12 +16,18 @@ type raidService interface {
 	Get(ctx context.Context, id uuid.UUID) (*domain.Raid, error)
 }
 
-// RaidService — gRPC-адаптер: переводит proto в вызовы сервиса и обратно, бизнес-логики здесь нет.
-type RaidService struct {
-	raidbossV1.UnimplementedRaidServiceServer
-	raids raidService
+// attackService принимает удары.
+type attackService interface {
+	Attack(ctx context.Context, p raid.AttackParams) (raid.AttackResult, error)
 }
 
-func NewRaidService(raids raidService) *RaidService {
-	return &RaidService{raids: raids}
+// RaidService — gRPC-адаптер: переводит proto в вызовы сервисов и обратно, бизнес-логики здесь нет.
+type RaidService struct {
+	raidbossV1.UnimplementedRaidServiceServer
+	raids   raidService
+	attacks attackService
+}
+
+func NewRaidService(raids raidService, attacks attackService) *RaidService {
+	return &RaidService{raids: raids, attacks: attacks}
 }
