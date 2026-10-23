@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -22,13 +23,16 @@ const deliveryTimeout = 5 * time.Second
 type Config struct {
 	Brokers []string
 	Topic   string
+	// MeterProvider необязателен: по умолчанию используется глобальный (см. telemetry.Setup).
+	MeterProvider metric.MeterProvider
 }
 
 // Producer пишет удары в топик raid.hits. Ключ записи — raid_id: все удары одного рейда попадают
 // в одну партицию и обрабатываются консьюмером по порядку.
 type Producer struct {
-	client *kgo.Client
-	topic  string
+	client  *kgo.Client
+	topic   string
+	metrics *producerMetrics
 }
 
 func NewProducer(cfg Config, extra ...kgo.Opt) (*Producer, error) {
@@ -37,6 +41,11 @@ func NewProducer(cfg Config, extra ...kgo.Opt) (*Producer, error) {
 	}
 	if cfg.Topic == "" {
 		return nil, errors.New("kafka: topic is required")
+	}
+
+	metrics, err := newProducerMetrics(cfg.MeterProvider)
+	if err != nil {
+		return nil, err
 	}
 
 	opts := append([]kgo.Opt{
@@ -52,21 +61,26 @@ func NewProducer(cfg Config, extra ...kgo.Opt) (*Producer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("kafka: new client: %w", err)
 	}
-	return &Producer{client: client, topic: cfg.Topic}, nil
+	return &Producer{client: client, topic: cfg.Topic, metrics: metrics}, nil
 }
 
 // Publish отправляет удар и ждёт подтверждения брокера. Контекст запроса (дедлайн клиента)
 // доходит до продюсера: по его отмене отправка прерывается.
 func (p *Producer) Publish(ctx context.Context, hit domain.Hit) error {
+	start := time.Now()
+
 	value, err := proto.Marshal(hitToEvent(hit))
 	if err != nil {
+		p.metrics.observe(ctx, start, reasonEncode)
 		return fmt.Errorf("marshal hit event: %w", err)
 	}
 
 	rec := &kgo.Record{Key: []byte(hit.RaidID.String()), Value: value}
 	if err := p.client.ProduceSync(ctx, rec).FirstErr(); err != nil {
+		p.metrics.observe(ctx, start, failureReason(err))
 		return fmt.Errorf("produce to %s: %w", p.topic, err)
 	}
+	p.metrics.observe(ctx, start, "")
 	return nil
 }
 
