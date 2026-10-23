@@ -2,9 +2,9 @@ syntax = "proto3";
 
 package raidboss.events.v1;
 
-option go_package = "github.com/andrzej80/clan-raid-go/gen/raidboss/events/v1;eventsv1";
-
 import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/andrzej80/clan-raid-go/gen/raidboss/events/v1;eventsv1";
 
 message HitEvent {
   string hit_id = 1;
