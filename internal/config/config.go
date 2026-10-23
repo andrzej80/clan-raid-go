@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -23,10 +24,19 @@ const (
 	defaultMaxConnLifetime = 30 * time.Minute
 )
 
+const defaultHitsTopic = "raid.hits"
+
+// KafkaConfig: Brokers может быть пустым (raidctl Kafka не нужна), api проверяет это при старте.
+type KafkaConfig struct {
+	Brokers   []string
+	HitsTopic string
+}
+
 type Config struct {
 	GRPCAddr       string
 	GRPCReflection bool
 	DB             pg.DbConfig
+	Kafka          KafkaConfig
 }
 
 // PublicServices — сервисы, которым не нужна авторизация
@@ -75,7 +85,21 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	cfg.DB = db
+	cfg.Kafka = loadKafka()
 	return cfg, nil
+}
+
+func loadKafka() KafkaConfig {
+	cfg := KafkaConfig{HitsTopic: defaultHitsTopic}
+	for broker := range strings.SplitSeq(os.Getenv("KAFKA_BROKERS"), ",") {
+		if broker = strings.TrimSpace(broker); broker != "" {
+			cfg.Brokers = append(cfg.Brokers, broker)
+		}
+	}
+	if topic := os.Getenv("KAFKA_HITS_TOPIC"); topic != "" {
+		cfg.HitsTopic = topic
+	}
+	return cfg
 }
 
 func loadDB() (pg.DbConfig, error) {

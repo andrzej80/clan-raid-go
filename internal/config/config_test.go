@@ -1,6 +1,7 @@
 package config
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -158,4 +159,56 @@ func TestLoadIncludesDB(t *testing.T) {
 			t.Fatal("Load() must fail without DATABASE_URL")
 		}
 	})
+}
+
+func TestLoadKafka(t *testing.T) {
+	tests := []struct {
+		name        string
+		brokers     string
+		topic       string
+		wantBrokers []string
+		wantTopic   string
+	}{
+		{"not set", "", "", nil, "raid.hits"},
+		{"one broker", "kafka:9092", "", []string{"kafka:9092"}, "raid.hits"},
+		{"several with spaces and empties", " a:9092, b:9092 ,,", "", []string{"a:9092", "b:9092"}, "raid.hits"},
+		{"custom topic", "kafka:9092", "hits.test", []string{"kafka:9092"}, "hits.test"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("KAFKA_BROKERS", tc.brokers)
+			t.Setenv("KAFKA_HITS_TOPIC", tc.topic)
+
+			got := loadKafka()
+			if !slices.Equal(got.Brokers, tc.wantBrokers) || got.HitsTopic != tc.wantTopic {
+				t.Fatalf("loadKafka() = %+v, want brokers %v topic %q", got, tc.wantBrokers, tc.wantTopic)
+			}
+		})
+	}
+}
+
+func TestPublicServices(t *testing.T) {
+	t.Parallel()
+
+	const (
+		health    = "grpc.health.v1.Health"
+		reflect   = "grpc.reflection.v1.ServerReflection"
+		reflectV1 = "grpc.reflection.v1alpha.ServerReflection"
+		raid      = "raidboss.v1.RaidService"
+	)
+
+	off := (&Config{GRPCReflection: false}).PublicServices()
+	if !slices.Contains(off, health) || slices.Contains(off, reflect) || slices.Contains(off, reflectV1) {
+		t.Fatalf("reflection off: got %v, want only health", off)
+	}
+
+	on := (&Config{GRPCReflection: true}).PublicServices()
+	for _, want := range []string{health, reflect, reflectV1} {
+		if !slices.Contains(on, want) {
+			t.Fatalf("reflection on: %v must contain %s", on, want)
+		}
+	}
+	if slices.Contains(on, raid) {
+		t.Fatalf("business service must never be public: %v", on)
+	}
 }

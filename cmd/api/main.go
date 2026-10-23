@@ -10,7 +10,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -21,7 +20,9 @@ import (
 	"github.com/andrzej80/clan-raid-go/internal/config"
 	"github.com/andrzej80/clan-raid-go/internal/grpcapi"
 	"github.com/andrzej80/clan-raid-go/internal/interceptors"
+	"github.com/andrzej80/clan-raid-go/internal/kafka"
 	"github.com/andrzej80/clan-raid-go/internal/raid"
+	"github.com/andrzej80/clan-raid-go/internal/ratelimit"
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
 	"github.com/andrzej80/clan-raid-go/internal/telemetry"
 )
@@ -30,6 +31,10 @@ const (
 	shutdownTimeout     = 10 * time.Second
 	healthCheckInterval = 2 * time.Second
 	dbPingTimeout       = 500 * time.Millisecond
+
+	// Правило 4 из README: 5 ударов в секунду на игрока, burst 10.
+	attackRatePerSecond = 5
+	attackBurst         = 10
 )
 
 type pinger interface {
@@ -75,10 +80,25 @@ func run(cfg *config.Config) error {
 	}
 	defer dbPool.Close()
 
-	raidRepo := pg.NewRaidRepo(dbPool)
-	service := grpcapi.NewRaidService(raid.NewService(raidRepo))
+	producer, err := kafka.NewProducer(kafka.Config{Brokers: cfg.Kafka.Brokers, Topic: cfg.Kafka.HitsTopic})
+	if err != nil {
+		return err
+	}
+	// Продюсер закрывается явно после GracefulStop: идущие Attack ждут подтверждения брокера.
+	// Этот defer — страховка для раннего выхода по ошибке.
+	producerClosed := false
+	defer func() {
+		if !producerClosed {
+			closeProducer(producer)
+		}
+	}()
 
-	srv, lis, err := initGRPCServer(ctx, cfg, service)
+	raidRepo := pg.NewRaidRepo(dbPool)
+	attacks := raid.NewAttackService(raidRepo, pg.NewCatalogRepo(dbPool), producer)
+	service := grpcapi.NewRaidService(raid.NewService(raidRepo), attacks)
+	limiter := ratelimit.NewMemory(attackRatePerSecond, attackBurst)
+
+	srv, lis, err := initGRPCServer(ctx, cfg, service, limiter)
 	if err != nil {
 		return err
 	}
@@ -87,7 +107,7 @@ func run(cfg *config.Config) error {
 	defer hs.Shutdown()
 	healthpb.RegisterHealthServer(srv, hs)
 
-	go watchHealth(ctx, dbPool, hs)
+	go watchHealth(ctx, allOf{dbPool, producer}, hs)
 
 	errCh := make(chan error, 1)
 
@@ -105,6 +125,17 @@ func run(cfg *config.Config) error {
 
 	slog.Info("Shutting down servers...")
 
+	stopServer(srv)
+	slog.Info("gRPC server stopped")
+
+	// Все RPC завершены (или принудительно остановлены), теперь можно сбросить буфер продюсера.
+	producerClosed = true
+	closeProducer(producer)
+	return nil
+}
+
+// stopServer ждёт завершения идущих RPC; по таймауту останавливает сервер принудительно.
+func stopServer(srv *grpc.Server) {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
@@ -120,14 +151,31 @@ func run(cfg *config.Config) error {
 		slog.Warn("graceful stop timed out")
 		srv.Stop()
 	}
+}
 
-	slog.Info("gRPC server stopped")
+func closeProducer(p *kafka.Producer) {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := p.Close(ctx); err != nil {
+		slog.Warn("kafka producer flush on shutdown", "err", err)
+	}
+}
+
+// allOf считает сервис здоровым, только если отвечают все зависимости.
+type allOf []pinger
+
+func (a allOf) Ping(ctx context.Context) error {
+	for _, p := range a {
+		if err := p.Ping(ctx); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-func watchHealth(ctx context.Context, pool *pgxpool.Pool, hs *health.Server) {
+func watchHealth(ctx context.Context, deps pinger, hs *health.Server) {
 	hs.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
-	lastStatus := checkDbStatus(ctx, pool, healthpb.HealthCheckResponse_NOT_SERVING, hs)
+	lastStatus := checkDbStatus(ctx, deps, healthpb.HealthCheckResponse_NOT_SERVING, hs)
 
 	ticker := time.NewTicker(healthCheckInterval)
 	defer ticker.Stop()
@@ -136,7 +184,7 @@ func watchHealth(ctx context.Context, pool *pgxpool.Pool, hs *health.Server) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			lastStatus = checkDbStatus(ctx, pool, lastStatus, hs)
+			lastStatus = checkDbStatus(ctx, deps, lastStatus, hs)
 		}
 	}
 }
@@ -165,6 +213,7 @@ func initGRPCServer(
 	ctx context.Context,
 	configParams *config.Config,
 	service raidbossV1.RaidServiceServer,
+	limiter interceptors.Limiter,
 ) (*grpc.Server, net.Listener, error) {
 	// ListenConfig, а не net.Listen: слушающий сокет тоже создается в контексте
 	// (его можно отменить, пока резолвится адрес). Этого требует линтер noctx.
@@ -175,12 +224,13 @@ func initGRPCServer(
 		return nil, nil, fmt.Errorf("failed to listen: %w", err)
 	}
 
-	return newGRPCServer(service, configParams), lis, nil
+	return newGRPCServer(service, configParams, limiter), lis, nil
 }
 
 func newGRPCServer(
 	service raidbossV1.RaidServiceServer,
 	configParams *config.Config,
+	limiter interceptors.Limiter,
 ) *grpc.Server {
 	auth := interceptors.NewAuth(configParams.PublicServices()...)
 	s := grpc.NewServer(
@@ -190,6 +240,7 @@ func newGRPCServer(
 			interceptors.UnaryLogging,
 			interceptors.UnaryRecovery,
 			auth.Unary(),
+			interceptors.UnaryRateLimit(limiter, raidbossV1.RaidService_Attack_FullMethodName),
 			interceptors.UnaryErrorMapper,
 		),
 		grpc.ChainStreamInterceptor(

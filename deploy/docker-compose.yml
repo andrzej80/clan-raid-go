@@ -22,12 +22,23 @@ services:
       - "${POSTGRES_PORT}:5432"
     volumes:
       - pg_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
   redis:
     image: redis:6.2.6-alpine
     networks:
       - app
     ports:
       - "${REDIS_PORT}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   # Kafka
   kafka:
@@ -49,6 +60,31 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
+  # Одноразовый контейнер: создаёт топики и завершается. Без заранее созданного топика
+  # raid.hits автосоздание дало бы одну партицию вместо 12.
+  kafka-init:
+    image: apache/kafka:4.3.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - app
+    restart: "no"
+    command:
+      - /opt/kafka/bin/kafka-topics.sh
+      - --bootstrap-server=kafka:9092
+      - --create
+      - --if-not-exists
+      - --topic=raid.hits
+      - --partitions=12
+      - --replication-factor=1
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -145,10 +181,16 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 
       - OTEL_SERVICE_NAME=api
     depends_on:
-      - pg
-      - redis
-      - kafka
-      - otel-collector
+      pg:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+      kafka-init:
+        condition: service_completed_successfully
   grpcui:
     image: fullstorydev/grpcui
     profiles: ["dev"]
