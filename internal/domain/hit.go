@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"context"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,4 +16,42 @@ type Hit struct {
 	Damage    int
 	IsCrit    bool
 	CreatedAt time.Time
+}
+
+// RaidState — часть строки raids, нужная консьюмеру ударов под блокировкой.
+type RaidState struct {
+	Status RaidStatus
+	HPLeft int64
+}
+
+// Kill — данные добивающего удара для перевода рейда в defeated.
+type Kill struct {
+	PlayerID   int64
+	HitID      uuid.UUID
+	FinishedAt time.Time
+}
+
+// OutboxMessage — запись transactional outbox; Payload — сериализованный protobuf.
+type OutboxMessage struct {
+	Topic   string
+	Key     string
+	Payload []byte
+	Headers map[string]string
+}
+
+// HitsRepository — операции над ударами; все вызываются внутри транзакции TxManager.
+type HitsRepository interface {
+	// LockRaid берёт строку рейда FOR UPDATE; ErrRaidNotFound, если рейда нет.
+	LockRaid(ctx context.Context, id uuid.UUID) (RaidState, error)
+	// ExistingHitIDs возвращает из ids те, что уже записаны в raid_hits.
+	ExistingHitIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]struct{}, error)
+	InsertHits(ctx context.Context, hits []Hit) error
+	// AddDamage прибавляет урон к raid_damage и возвращает абсолютные суммы затронутых игроков.
+	AddDamage(ctx context.Context, raidID uuid.UUID, delta []PlayerDamage) ([]PlayerDamage, error)
+	// UpdateHP сохраняет hp_left; при kill != nil переводит рейд в defeated.
+	UpdateHP(ctx context.Context, raidID uuid.UUID, hpLeft int64, kill *Kill) error
+}
+
+type OutboxRepository interface {
+	Add(ctx context.Context, msg OutboxMessage) error
 }

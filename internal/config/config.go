@@ -24,12 +24,23 @@ const (
 	defaultMaxConnLifetime = 30 * time.Minute
 )
 
-const defaultHitsTopic = "raid.hits"
+const (
+	defaultHitsTopic    = "raid.hits"
+	defaultHitsDLQTopic = "raid.hits.dlq"
+	defaultHitsGroup    = "hits-consumer"
+	defaultBatchSize    = 500
+	defaultBatchTimeout = 50 * time.Millisecond
+)
 
 // KafkaConfig: Brokers может быть пустым (raidctl Kafka не нужна), api проверяет это при старте.
 type KafkaConfig struct {
-	Brokers   []string
-	HitsTopic string
+	Brokers      []string
+	HitsTopic    string
+	HitsDLQTopic string
+	// ConsumerGroup и параметры пачки используются только hits-consumer.
+	ConsumerGroup string
+	BatchSize     int
+	BatchTimeout  time.Duration
 }
 
 type Config struct {
@@ -90,7 +101,13 @@ func Load() (*Config, error) {
 }
 
 func loadKafka() KafkaConfig {
-	cfg := KafkaConfig{HitsTopic: defaultHitsTopic}
+	cfg := KafkaConfig{
+		HitsTopic:     defaultHitsTopic,
+		HitsDLQTopic:  defaultHitsDLQTopic,
+		ConsumerGroup: defaultHitsGroup,
+		BatchSize:     int(getEnvInt("CONSUMER_BATCH_SIZE", defaultBatchSize)),
+		BatchTimeout:  getEnvDuration("CONSUMER_BATCH_TIMEOUT", defaultBatchTimeout),
+	}
 	for broker := range strings.SplitSeq(os.Getenv("KAFKA_BROKERS"), ",") {
 		if broker = strings.TrimSpace(broker); broker != "" {
 			cfg.Brokers = append(cfg.Brokers, broker)
@@ -98,6 +115,15 @@ func loadKafka() KafkaConfig {
 	}
 	if topic := os.Getenv("KAFKA_HITS_TOPIC"); topic != "" {
 		cfg.HitsTopic = topic
+	}
+	if topic := os.Getenv("KAFKA_HITS_DLQ_TOPIC"); topic != "" {
+		cfg.HitsDLQTopic = topic
+	}
+	if group := os.Getenv("KAFKA_CONSUMER_GROUP"); group != "" {
+		cfg.ConsumerGroup = group
+	}
+	if cfg.BatchSize < 1 {
+		cfg.BatchSize = defaultBatchSize
 	}
 	return cfg
 }

@@ -77,14 +77,15 @@ services:
     networks:
       - app
     restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
     command:
-      - /opt/kafka/bin/kafka-topics.sh
-      - --bootstrap-server=kafka:9092
-      - --create
-      - --if-not-exists
-      - --topic=raid.hits
-      - --partitions=12
-      - --replication-factor=1
+      - |
+        set -e
+        create() { /opt/kafka/bin/kafka-topics.sh --bootstrap-server=kafka:9092 --create --if-not-exists --topic=$$1 --partitions=$$2 --replication-factor=1; }
+        create raid.hits 12
+        create raid.hits.dlq 1
+        create raid.events 6
+        create rewards.granted 6
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
