@@ -247,3 +247,94 @@ func TestPublicServices(t *testing.T) {
 		t.Fatalf("business service must never be public: %v", on)
 	}
 }
+
+func TestLoadKafkaEventTopics(t *testing.T) {
+	tests := []struct {
+		name                                   string
+		events, eventsDLQ, rewards, rewardsGrp string
+		want                                   KafkaConfig
+	}{
+		{
+			name: "defaults",
+			want: KafkaConfig{
+				EventsTopic: "raid.events", EventsDLQTopic: "raid.events.dlq",
+				RewardsTopic: "rewards.granted", RewardsGroup: "rewards-worker",
+			},
+		},
+		{
+			name:   "overrides",
+			events: "events.test", eventsDLQ: "events.dlq.test", rewards: "rewards.test", rewardsGrp: "rw",
+			want: KafkaConfig{
+				EventsTopic: "events.test", EventsDLQTopic: "events.dlq.test",
+				RewardsTopic: "rewards.test", RewardsGroup: "rw",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("KAFKA_EVENTS_TOPIC", tc.events)
+			t.Setenv("KAFKA_EVENTS_DLQ_TOPIC", tc.eventsDLQ)
+			t.Setenv("KAFKA_REWARDS_TOPIC", tc.rewards)
+			t.Setenv("REWARDS_CONSUMER_GROUP", tc.rewardsGrp)
+
+			got := loadKafka()
+			if got.EventsTopic != tc.want.EventsTopic || got.EventsDLQTopic != tc.want.EventsDLQTopic ||
+				got.RewardsTopic != tc.want.RewardsTopic || got.RewardsGroup != tc.want.RewardsGroup {
+				t.Fatalf("loadKafka() = %+v, want topics %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadOutbox(t *testing.T) {
+	tests := []struct {
+		name         string
+		batch, poll  string
+		wantBatch    int
+		wantInterval time.Duration
+	}{
+		{"defaults", "", "", 100, 200 * time.Millisecond},
+		{"overrides", "10", "1s", 10, time.Second},
+		// Нулевые и отрицательные значения заменяются умолчаниями: иначе relay крутился бы вхолостую.
+		{"zero batch and interval", "0", "0s", 100, 200 * time.Millisecond},
+		{"negative batch and interval", "-5", "-1s", 100, 200 * time.Millisecond},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OUTBOX_BATCH_SIZE", tc.batch)
+			t.Setenv("OUTBOX_POLL_INTERVAL", tc.poll)
+
+			got := loadOutbox()
+			if got.BatchSize != tc.wantBatch || got.PollInterval != tc.wantInterval {
+				t.Fatalf("loadOutbox() = %+v, want batch %d interval %v", got, tc.wantBatch, tc.wantInterval)
+			}
+		})
+	}
+}
+
+func TestLoadScheduler(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want time.Duration
+	}{
+		{"default", "", 10 * time.Second},
+		{"override", "3s", 3 * time.Second},
+		{"zero falls back", "0s", 10 * time.Second},
+		{"negative falls back", "-1s", 10 * time.Second},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "postgres://test@localhost/raidboss")
+			t.Setenv("SCHEDULER_INTERVAL", tc.env)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.Scheduler.Interval != tc.want {
+				t.Fatalf("scheduler interval = %v, want %v", cfg.Scheduler.Interval, tc.want)
+			}
+		})
+	}
+}

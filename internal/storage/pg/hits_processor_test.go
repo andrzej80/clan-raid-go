@@ -247,3 +247,50 @@ func (e *processorEnv) exec(t *testing.T, query string, args ...any) {
 		t.Fatalf("exec %q: %v", query, err)
 	}
 }
+
+// Рейд ещё active (scheduler не успел его закрыть), но удар создан в ends_at или позже:
+// он опоздал и не должен ни засчитаться, ни убить босса.
+func TestHitsProcessor_HitsAfterEndsAtAreLate(t *testing.T) {
+	t.Parallel()
+
+	env := newProcessorEnv(t, 2)
+	r := env.newRaidWithHP(t, 100)
+	if _, err := env.pool.Exec(context.Background(),
+		`UPDATE raids SET ends_at = $2 WHERE id = $1`, r.ID, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("set ends_at: %v", err)
+	}
+	var endsAt time.Time
+	if err := env.pool.QueryRow(context.Background(), `SELECT ends_at FROM raids WHERE id = $1`, r.ID).
+		Scan(&endsAt); err != nil {
+		t.Fatalf("read ends_at: %v", err)
+	}
+
+	timely := env.hit(r.ID, env.players[0], 40)
+	timely.CreatedAt = endsAt.Add(-time.Second)
+	atDeadline := env.hit(r.ID, env.players[1], 500) // убил бы босса, но создан ровно в ends_at
+	atDeadline.CreatedAt = endsAt
+	after := env.hit(r.ID, env.players[1], 500)
+	after.CreatedAt = endsAt.Add(time.Second)
+
+	mustProcess(t, env.processor, []domain.Hit{timely, atDeadline, after})
+
+	got, err := env.raids.GetRaid(context.Background(), r.ID)
+	if err != nil {
+		t.Fatalf("GetRaid: %v", err)
+	}
+	if got.Status != domain.RaidActive || got.HPLeft != 60 {
+		t.Fatalf("raid status=%s hp=%d, want active 60: hits after ends_at must not count", got.Status, got.HPLeft)
+	}
+	if n := env.count(t, `SELECT count(*) FROM raid_hits WHERE raid_id = $1`, r.ID); n != 1 {
+		t.Fatalf("raid_hits = %d, want 1", n)
+	}
+	if n := env.count(t, `SELECT count(*) FROM outbox WHERE key = $1`, r.ID.String()); n != 0 {
+		t.Fatalf("outbox events = %d, want 0: the boss must not die from late hits", n)
+	}
+
+	// Повтор той же пачки ничего не меняет.
+	mustProcess(t, env.processor, []domain.Hit{timely, atDeadline, after})
+	if n := env.count(t, `SELECT total_damage FROM raid_damage WHERE raid_id = $1`, r.ID); n != 40 {
+		t.Fatalf("total_damage after replay = %d, want 40", n)
+	}
+}

@@ -226,17 +226,22 @@ func (p *HitsProcessor) processRaid(ctx context.Context, group domain.RaidHits) 
 			return nil
 		}
 
-		fresh, err := p.filterNew(ctx, group.Hits)
+		// Рейд ещё active, но scheduler мог не успеть его закрыть: опоздавшими считаем удары,
+		// созданные в ends_at или позже.
+		timely, afterDeadline := domain.SplitByDeadline(group.Hits, state.EndsAt)
+		stats.late = len(afterDeadline)
+
+		fresh, err := p.filterNew(ctx, timely)
 		if err != nil {
 			return err
 		}
-		stats.duplicate = len(group.Hits) - len(fresh)
+		stats.duplicate = len(timely) - len(fresh)
 		if len(fresh) == 0 {
 			return nil
 		}
 
 		out := domain.ApplyHits(state.HPLeft, fresh)
-		stats.accepted, stats.late = len(out.Accepted), len(out.Late)
+		stats.accepted, stats.late = len(out.Accepted), stats.late+len(out.Late)
 		totals, err := p.persist(ctx, group.RaidID, out)
 		if err != nil {
 			return err

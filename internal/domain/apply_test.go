@@ -3,6 +3,7 @@ package domain
 import (
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -126,4 +127,42 @@ func TestAggregateDamage(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("AggregateDamage = %+v, want %+v", got, want)
 	}
+}
+
+func TestSplitByDeadline(t *testing.T) {
+	t.Parallel()
+
+	endsAt := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+	in := hitsOf(1, 2, 3, 4, 5)
+	in[0].CreatedAt = endsAt.Add(-time.Second)
+	in[1].CreatedAt = endsAt // ровно в ends_at — уже поздно
+	in[2].CreatedAt = endsAt.Add(-time.Nanosecond)
+	in[3].CreatedAt = endsAt.Add(time.Second)
+	in[4].CreatedAt = endsAt.Add(-time.Hour)
+
+	timely, late := SplitByDeadline(in, endsAt)
+
+	if got := damages(timely); !slices.Equal(got, []int{1, 3, 5}) {
+		t.Fatalf("timely = %v, want [1 3 5] in input order", got)
+	}
+	if got := damages(late); !slices.Equal(got, []int{2, 4}) {
+		t.Fatalf("late = %v, want [2 4] in input order", got)
+	}
+}
+
+func TestSplitByDeadline_Empty(t *testing.T) {
+	t.Parallel()
+
+	timely, late := SplitByDeadline(nil, time.Now())
+	if len(timely) != 0 || len(late) != 0 {
+		t.Fatalf("timely=%v late=%v, want both empty", timely, late)
+	}
+}
+
+func damages(hits []Hit) []int {
+	out := make([]int, len(hits))
+	for i, h := range hits {
+		out[i] = h.Damage
+	}
+	return out
 }

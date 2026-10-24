@@ -88,8 +88,10 @@ message RaidFinished {
   int64 killer_player_id = 2;
 }
 
+// Игрок берётся из metadata "x-player-id"; возвращаются только его награды.
 message ListRewardsRequest {
-  int64 player_id = 1;
+  // Не используется: сервер игнорирует поле. Оставлено, чтобы не ломать совместимость схемы.
+  int64 player_id = 1 [deprecated = true];
 }
 message Reward {
   string raid_id = 1;
