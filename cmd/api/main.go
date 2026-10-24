@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -23,6 +24,7 @@ import (
 	"github.com/andrzej80/clan-raid-go/internal/raid"
 	"github.com/andrzej80/clan-raid-go/internal/ratelimit"
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
+	"github.com/andrzej80/clan-raid-go/internal/storage/rdb"
 )
 
 const (
@@ -57,6 +59,15 @@ func run(ctx context.Context, cfg *config.Config) error {
 	}
 	defer dbPool.Close()
 
+	if cfg.Redis.URL == "" {
+		return errors.New("REDIS_URL is required")
+	}
+	redisClient, err := rdb.New(ctx, &cfg.Redis)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = redisClient.Close() }() //nolint:gosec // закрытие при выходе, ошибку обработать нечем
+
 	producer, err := kafka.NewProducer(kafka.Config{Brokers: cfg.Kafka.Brokers, Topic: cfg.Kafka.HitsTopic})
 	if err != nil {
 		return err
@@ -69,7 +80,12 @@ func run(ctx context.Context, cfg *config.Config) error {
 	raidRepo := pg.NewRaidRepo(dbPool)
 	attacks := raid.NewAttackService(raidRepo, pg.NewCatalogRepo(dbPool), producer)
 	service := grpcapi.NewRaidService(raid.NewService(raidRepo), attacks)
-	limiter := ratelimit.NewMemory(attackRatePerSecond, attackBurst)
+	// Лимит общий для всех экземпляров api (Redis). При сбое Redis лимит ослабляется до
+	// «на экземпляр» (Memory), но не пропадает; fail open остаётся только на случай ошибки обоих.
+	limiter := ratelimit.NewFallback(
+		ratelimit.NewRedis(redisClient.Redis(), attackRatePerSecond, attackBurst),
+		ratelimit.NewMemory(attackRatePerSecond, attackBurst),
+	)
 
 	srv, lis, err := initGRPCServer(ctx, cfg, service, limiter)
 	if err != nil {
@@ -80,6 +96,9 @@ func run(ctx context.Context, cfg *config.Config) error {
 	defer hs.Shutdown()
 	healthpb.RegisterHealthServer(srv, hs)
 
+	// Redis здесь намеренно нет: это не критичная зависимость. Лимит при его сбое держит Memory,
+	// а Attack от Redis не зависит. Если появится чтение, которому некуда деться без Redis
+	// (например, GetLeaderboard без фоллбэка на Postgres), решение стоит пересмотреть.
 	go watchHealth(ctx, dependencies{
 		{name: "postgres", pinger: dbPool, timeout: dbPingTimeout},
 		{name: "kafka", pinger: producer, timeout: kafkaPingTimeout},

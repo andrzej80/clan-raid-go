@@ -15,6 +15,7 @@ import (
 	reflectionv1alpha "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
 
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
+	"github.com/andrzej80/clan-raid-go/internal/storage/rdb"
 )
 
 const (
@@ -22,6 +23,12 @@ const (
 	defaultMinConns        = 0
 	defaultMaxConnIdleTime = 5 * time.Minute
 	defaultMaxConnLifetime = 30 * time.Minute
+)
+
+const (
+	defaultRedisPoolSize    = 20
+	defaultRedisDialTimeout = time.Second
+	defaultRedisIOTimeout   = 500 * time.Millisecond
 )
 
 const (
@@ -50,7 +57,9 @@ type Config struct {
 	GRPCAddr       string
 	GRPCReflection bool
 	DB             pg.DbConfig
-	Kafka          KafkaConfig
+	// Redis.URL может быть пустым (raidctl Redis не нужен), api проверяет это при старте.
+	Redis rdb.Config
+	Kafka KafkaConfig
 }
 
 // PublicServices — сервисы, которым не нужна авторизация
@@ -100,7 +109,18 @@ func Load() (*Config, error) {
 	}
 	cfg.DB = db
 	cfg.Kafka = loadKafka()
+	cfg.Redis = loadRedis()
 	return cfg, nil
+}
+
+func loadRedis() rdb.Config {
+	return rdb.Config{
+		URL:          os.Getenv("REDIS_URL"),
+		PoolSize:     int(getEnvInt("REDIS_POOL_SIZE", defaultRedisPoolSize)),
+		DialTimeout:  getEnvDuration("REDIS_DIAL_TIMEOUT", defaultRedisDialTimeout),
+		ReadTimeout:  getEnvDuration("REDIS_READ_TIMEOUT", defaultRedisIOTimeout),
+		WriteTimeout: getEnvDuration("REDIS_WRITE_TIMEOUT", defaultRedisIOTimeout),
+	}
 }
 
 func loadKafka() KafkaConfig {
