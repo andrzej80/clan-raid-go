@@ -4,59 +4,31 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
 
+	"github.com/andrzej80/clan-raid-go/internal/app"
 	"github.com/andrzej80/clan-raid-go/internal/config"
 	"github.com/andrzej80/clan-raid-go/internal/kafka"
 	"github.com/andrzej80/clan-raid-go/internal/raid"
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
-	"github.com/andrzej80/clan-raid-go/internal/telemetry"
 )
 
-// telemetryShutdownTimeout — сколько ждём финального сброса метрик и трейсов в коллектор.
-const telemetryShutdownTimeout = 5 * time.Second
-
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
-
-	cfg, err := config.Load()
-	if err != nil {
-		slog.Error("fatal", "err", err)
-		os.Exit(1)
-	}
-	if err := run(cfg); err != nil {
-		slog.Error("fatal", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("hits-consumer stopped")
+	app.Main("hits-consumer", run)
 }
 
-func run(cfg *config.Config) error {
+func run(ctx context.Context, cfg *config.Config) error {
 	if len(cfg.Kafka.Brokers) == 0 {
 		return errors.New("KAFKA_BROKERS is required")
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	shutdownTelemetry, err := telemetry.Setup(ctx)
+	flushTelemetry, err := app.SetupTelemetry(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		// Контекст создаётся в момент остановки: родительский ctx уже отменён сигналом.
-		flushCtx, cancel := context.WithTimeout(context.Background(), telemetryShutdownTimeout)
-		defer cancel()
-		if err := shutdownTelemetry(flushCtx); err != nil {
-			slog.Warn("telemetry shutdown", "err", err)
-		}
-	}()
+	defer flushTelemetry()
 
-	// Один пул на процесс. MaxConns должен покрывать число одновременно обрабатываемых партиций
-	// (PG_MAX_CONNS): каждая держит по одной транзакции.
+	// Один пул на процесс. MaxConns — потолок одновременных транзакций (PG_MAX_CONNS): соединения
+	// открываются по мере надобности, а при нехватке партиции ждут очереди, не теряя порядка.
 	dbPool, err := pg.NewPool(ctx, &cfg.DB)
 	if err != nil {
 		return err
