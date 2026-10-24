@@ -27,6 +27,7 @@ const (
 const (
 	defaultHitsTopic    = "raid.hits"
 	defaultHitsDLQTopic = "raid.hits.dlq"
+	defaultEventsTopic  = "raid.events"
 	defaultHitsGroup    = "hits-consumer"
 	defaultBatchSize    = 500
 	defaultBatchTimeout = 50 * time.Millisecond
@@ -37,6 +38,8 @@ type KafkaConfig struct {
 	Brokers      []string
 	HitsTopic    string
 	HitsDLQTopic string
+	// EventsTopic — топик, куда outbox-relay переносит события рейдов; имя пишется в outbox.topic.
+	EventsTopic string
 	// ConsumerGroup и параметры пачки используются только hits-consumer.
 	ConsumerGroup string
 	BatchSize     int
@@ -104,6 +107,7 @@ func loadKafka() KafkaConfig {
 	cfg := KafkaConfig{
 		HitsTopic:     defaultHitsTopic,
 		HitsDLQTopic:  defaultHitsDLQTopic,
+		EventsTopic:   defaultEventsTopic,
 		ConsumerGroup: defaultHitsGroup,
 		BatchSize:     int(getEnvInt("CONSUMER_BATCH_SIZE", defaultBatchSize)),
 		BatchTimeout:  getEnvDuration("CONSUMER_BATCH_TIMEOUT", defaultBatchTimeout),

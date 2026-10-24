@@ -89,6 +89,9 @@ func (r *HitsRepo) InsertHits(ctx context.Context, hits []domain.Hit) error {
 		SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::bigint[], $4::int[], $5::bool[], $6::timestamptz[])`,
 		ids, raidIDs, players, damages, crits, created)
 	if err != nil {
+		if isViolation(err, pgForeignKeyViolation, constraintHitsPlayerFK) {
+			return fmt.Errorf("insert hits: %w", domain.ErrPlayerNotFound)
+		}
 		return fmt.Errorf("insert hits: %w", err)
 	}
 	return nil

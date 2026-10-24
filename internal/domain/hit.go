@@ -55,3 +55,16 @@ type HitsRepository interface {
 type OutboxRepository interface {
 	Add(ctx context.Context, msg OutboxMessage) error
 }
+
+// RejectedHits — удары рейда, которые консьюмер не смог применить из-за неисправимой ошибки
+// (например, игрока не существует). Повтор не поможет: такие удары уходят в DLQ.
+type RejectedHits struct {
+	RaidID uuid.UUID
+	Hits   []Hit
+	Reason string
+}
+
+// BatchResult — итог обработки пачки ударов.
+type BatchResult struct {
+	Rejected []RejectedHits
+}
