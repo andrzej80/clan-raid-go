@@ -18,6 +18,7 @@ const (
 const (
 	constraintOneActiveRaidPerClan = "raids_one_active_per_clan"
 	constraintRaidsClanFK          = "raids_clan_id_fkey"
+	constraintHitsPlayerFK         = "raid_hits_player_id_fkey"
 )
 
 // dbtx — общий интерфейс для *pgxpool.Pool и pgx.Tx.

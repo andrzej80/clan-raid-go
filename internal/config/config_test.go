@@ -8,6 +8,24 @@ import (
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
 )
 
+func TestLoadKafkaConsumerDefaults(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://test@localhost/raidboss")
+	t.Setenv("KAFKA_BROKERS", "a:9092, b:9092")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	k := cfg.Kafka
+	if !slices.Equal(k.Brokers, []string{"a:9092", "b:9092"}) {
+		t.Fatalf("brokers = %v", k.Brokers)
+	}
+	if k.HitsDLQTopic != "raid.hits.dlq" || k.ConsumerGroup != "hits-consumer" ||
+		k.BatchSize != 500 || k.BatchTimeout != 50*time.Millisecond {
+		t.Fatalf("unexpected defaults: %+v", k)
+	}
+}
+
 func TestLoad(t *testing.T) {
 	t.Setenv("APP_HOST", "")
 	t.Setenv("APP_PORT", "")

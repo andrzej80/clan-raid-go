@@ -1,5 +1,7 @@
 FROM golang:1.27-alpine AS builder
 
+ARG SERVICE=api
+
 RUN apk add --no-cache git
 
 WORKDIR /build
@@ -9,7 +11,7 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /app/server ./cmd/api
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /app/server ./cmd/${SERVICE}
 
 
 FROM alpine:3.20 AS production

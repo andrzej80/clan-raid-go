@@ -69,3 +69,35 @@ func failureReason(err error) string {
 		return reasonBroker
 	}
 }
+
+// Значения атрибута reason у счётчика DLQ.
+const (
+	dlqReasonDecode   = "decode"   // сообщение не разобралось как HitEvent
+	dlqReasonRejected = "rejected" // удар валиден, но применить его нельзя (нет игрока или рейда)
+)
+
+type consumerMetrics struct {
+	dlq          metric.Int64Counter
+	batchRetries metric.Int64Counter
+}
+
+func newConsumerMetrics(mp metric.MeterProvider) (*consumerMetrics, error) {
+	if mp == nil {
+		mp = otel.GetMeterProvider()
+	}
+	meter := mp.Meter(meterName)
+
+	dlq, err := meter.Int64Counter("raidboss.kafka.consume.dlq",
+		metric.WithDescription("Records sent to the dead-letter topic"),
+		metric.WithUnit("{record}"))
+	if err != nil {
+		return nil, fmt.Errorf("create dlq counter: %w", err)
+	}
+	retries, err := meter.Int64Counter("raidboss.kafka.consume.batch.retries",
+		metric.WithDescription("Failed attempts to process a batch (the batch is retried)"),
+		metric.WithUnit("{attempt}"))
+	if err != nil {
+		return nil, fmt.Errorf("create batch retries counter: %w", err)
+	}
+	return &consumerMetrics{dlq: dlq, batchRetries: retries}, nil
+}

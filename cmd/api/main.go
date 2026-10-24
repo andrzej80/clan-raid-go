@@ -5,10 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -18,6 +15,7 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	raidbossV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/v1"
+	"github.com/andrzej80/clan-raid-go/internal/app"
 	"github.com/andrzej80/clan-raid-go/internal/config"
 	"github.com/andrzej80/clan-raid-go/internal/grpcapi"
 	"github.com/andrzej80/clan-raid-go/internal/interceptors"
@@ -25,16 +23,13 @@ import (
 	"github.com/andrzej80/clan-raid-go/internal/raid"
 	"github.com/andrzej80/clan-raid-go/internal/ratelimit"
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
-	"github.com/andrzej80/clan-raid-go/internal/telemetry"
 )
 
 const (
-	shutdownTimeout = 10 * time.Second
-	// telemetryShutdownTimeout — сколько ждём финального сброса метрик и трейсов в коллектор.
-	telemetryShutdownTimeout = 5 * time.Second
-	healthCheckInterval      = 2 * time.Second
-	dbPingTimeout            = 500 * time.Millisecond
-	kafkaPingTimeout         = 2 * time.Second
+	shutdownTimeout     = 10 * time.Second
+	healthCheckInterval = 2 * time.Second
+	dbPingTimeout       = 500 * time.Millisecond
+	kafkaPingTimeout    = 2 * time.Second
 
 	// Правило 4 из README: 5 ударов в секунду на игрока, burst 10.
 	attackRatePerSecond = 5
@@ -46,39 +41,15 @@ type pinger interface {
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	slog.SetDefault(logger)
-
-	cfg, err := config.Load()
-	if err != nil {
-		slog.Error("fatal", "err", err)
-		os.Exit(1)
-	}
-
-	if err := run(cfg); err != nil {
-		slog.Error("fatal", "err", err)
-		os.Exit(1)
-	}
-
-	slog.Info("gRPC server stopped", "port", cfg.GRPCAddr, "isDevMode", cfg.GRPCReflection)
+	app.Main("api", run)
 }
 
-func run(cfg *config.Config) error {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	shutdownTelemetry, err := telemetry.Setup(ctx)
+func run(ctx context.Context, cfg *config.Config) error {
+	flushTelemetry, err := app.SetupTelemetry(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		// Контекст создаётся в момент остановки и живёт до конца сброса: иначе остатки метрик
-		// и трейсов не уйдут в коллектор. Родительский ctx уже отменён сигналом, поэтому он не подходит.
-		flushCtx, cancel := context.WithTimeout(context.Background(), telemetryShutdownTimeout)
-		defer cancel()
-		if err := shutdownTelemetry(flushCtx); err != nil {
-			slog.Warn("telemetry shutdown", "err", err)
-		}
-	}()
+	defer flushTelemetry()
 
 	dbPool, err := pg.NewPool(ctx, &cfg.DB)
 	if err != nil {
@@ -92,7 +63,7 @@ func run(cfg *config.Config) error {
 	}
 	// Продюсер закрывается после GracefulStop (см. shutdown): идущие Attack ждут подтверждения брокера.
 	// Defer — страховка для раннего выхода по ошибке; OnceFunc не даст закрыть дважды.
-	closeKafka := sync.OnceFunc(func() { closeProducer(producer) })
+	closeKafka := sync.OnceFunc(func() { closeProducer(producer) }) //nolint:contextcheck // закрытие после отмены ctx сигналом
 	defer closeKafka()
 
 	raidRepo := pg.NewRaidRepo(dbPool)
