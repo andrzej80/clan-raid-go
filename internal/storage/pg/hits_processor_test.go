@@ -239,3 +239,11 @@ func TestHitsProcessor_RejectsUnknownPlayerAndRaid(t *testing.T) {
 		t.Fatalf("good raid hp = %d, want 90 (rejects must not block other raids)", gotGood.HPLeft)
 	}
 }
+
+func (e *processorEnv) exec(t *testing.T, query string, args ...any) {
+	t.Helper()
+
+	if _, err := e.pool.Exec(context.Background(), query, args...); err != nil {
+		t.Fatalf("exec %q: %v", query, err)
+	}
+}

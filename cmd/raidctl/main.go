@@ -1,5 +1,4 @@
-// raidctl — служебный CLI: seed, verify, rebuild-cache, outbox dump.
-// Пока реализована только команда seed.
+// raidctl — служебный CLI: migrate, seed, verify (позже rebuild-cache, outbox dump).
 package main
 
 import (
@@ -22,7 +21,9 @@ import (
 const usage = `usage: raidctl <command> [flags]
 
 commands:
+  migrate apply SQL migrations (raidctl migrate --dir migrations)
   seed    create clans and players (raidctl seed --clans 100 --players 50)
+  verify  check invariants in PostgreSQL (raidctl verify [--raid <uuid>]); exit code 1 on violations
 `
 
 func main() {
@@ -48,6 +49,10 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return fmt.Errorf("command is required\n\n%s", usage)
 	}
 	switch args[0] {
+	case "migrate":
+		return runMigrate(ctx, args[1:], out)
+	case "verify":
+		return runVerify(ctx, args[1:], out)
 	case "seed":
 		return runSeed(ctx, args[1:], out)
 	default:

@@ -86,7 +86,10 @@ func (r *HitsRepo) InsertHits(ctx context.Context, hits []domain.Hit) error {
 	}
 	_, err := conn(ctx, r.pool).Exec(ctx, `
 		INSERT INTO raid_hits (hit_id, raid_id, player_id, damage, is_crit, created_at)
-		SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::bigint[], $4::int[], $5::bool[], $6::timestamptz[])`,
+		SELECT hit_id, raid_id, player_id, damage, is_crit, created_at
+		FROM unnest($1::uuid[], $2::uuid[], $3::bigint[], $4::int[], $5::bool[], $6::timestamptz[])
+			WITH ORDINALITY AS t(hit_id, raid_id, player_id, damage, is_crit, created_at, ord)
+		ORDER BY ord`, // порядок вставки = порядок применения: от него зависит seq
 		ids, raidIDs, players, damages, crits, created)
 	if err != nil {
 		if isViolation(err, pgForeignKeyViolation, constraintHitsPlayerFK) {
