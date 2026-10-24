@@ -10,10 +10,9 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/testcontainers/testcontainers-go"
-	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
 
 	"github.com/andrzej80/clan-raid-go/internal/storage/rdb"
+	"github.com/andrzej80/clan-raid-go/internal/testutil"
 )
 
 // testRedis общий для тестов пакета; nil, если Docker недоступен.
@@ -24,32 +23,18 @@ func TestMain(m *testing.M) {
 }
 
 func runTests(m *testing.M) int {
-	ctx := context.Background()
-
-	container, err := tcredis.Run(ctx, "redis:7-alpine")
+	client, cleanup, err := testutil.StartRedis(context.Background())
 	if err != nil {
 		// В CI Docker обязателен: иначе интеграционные тесты молча пропустятся, а сборка останется зелёной.
 		if os.Getenv("REQUIRE_DOCKER") == "true" {
-			fmt.Fprintln(os.Stderr, "redis container unavailable, but REQUIRE_DOCKER=true:", err)
+			fmt.Fprintln(os.Stderr, "redis unavailable, but REQUIRE_DOCKER=true:", err)
 			return 1
 		}
-		fmt.Fprintln(os.Stderr, "redis container unavailable, integration tests will be skipped:", err)
+		fmt.Fprintln(os.Stderr, "redis unavailable, integration tests will be skipped:", err)
 		return m.Run()
 	}
-	defer func() { _ = testcontainers.TerminateContainer(container) }()
-
-	uri, err := container.ConnectionString(ctx)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "connection string:", err)
-		return 1
-	}
-	client, err := rdb.New(ctx, &rdb.Config{URL: uri})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "redis client:", err)
-		return 1
-	}
-	defer func() { _ = client.Close() }()
-	testRedis = client.Redis()
+	defer cleanup()
+	testRedis = client
 	return m.Run()
 }
 
