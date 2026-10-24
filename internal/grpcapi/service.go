@@ -21,13 +21,19 @@ type attackService interface {
 	Attack(ctx context.Context, p raid.AttackParams) (raid.AttackResult, error)
 }
 
+// leaderboardService отдаёт лидерборд рейда.
+type leaderboardService interface {
+	Top(ctx context.Context, raidID uuid.UUID, limit int) ([]domain.LeaderboardEntry, error)
+}
+
 // RaidService — gRPC-адаптер: переводит proto в вызовы сервисов и обратно, бизнес-логики здесь нет.
 type RaidService struct {
 	raidbossV1.UnimplementedRaidServiceServer
 	raids   raidService
 	attacks attackService
+	board   leaderboardService
 }
 
-func NewRaidService(raids raidService, attacks attackService) *RaidService {
-	return &RaidService{raids: raids, attacks: attacks}
+func NewRaidService(raids raidService, attacks attackService, board leaderboardService) *RaidService {
+	return &RaidService{raids: raids, attacks: attacks, board: board}
 }

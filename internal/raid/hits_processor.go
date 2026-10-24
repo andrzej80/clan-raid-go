@@ -34,6 +34,9 @@ type processorMetrics struct {
 	hits      metric.Int64Counter
 	batchSize metric.Int64Histogram
 	duration  metric.Float64Histogram
+
+	boardDuration metric.Float64Histogram
+	boardErrors   metric.Int64Counter
 }
 
 func newProcessorMetrics(mp metric.MeterProvider) (*processorMetrics, error) {
@@ -60,7 +63,21 @@ func newProcessorMetrics(mp metric.MeterProvider) (*processorMetrics, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create batch duration histogram: %w", err)
 	}
-	return &processorMetrics{hits: hits, batchSize: size, duration: dur}, nil
+	boardDur, err := meter.Float64Histogram("raidboss.consumer.board.duration",
+		metric.WithDescription("Time to write raid state to the Redis leaderboard"),
+		metric.WithUnit("s"))
+	if err != nil {
+		return nil, fmt.Errorf("create board duration histogram: %w", err)
+	}
+	boardErrs, err := meter.Int64Counter("raidboss.consumer.board.errors",
+		metric.WithDescription("Failed writes of raid state to Redis (repaired by raidctl rebuild-cache)"),
+		metric.WithUnit("{error}"))
+	if err != nil {
+		return nil, fmt.Errorf("create board errors counter: %w", err)
+	}
+	return &processorMetrics{
+		hits: hits, batchSize: size, duration: dur, boardDuration: boardDur, boardErrors: boardErrs,
+	}, nil
 }
 
 func (m *processorMetrics) addHits(ctx context.Context, outcome string, n int) {
@@ -70,9 +87,20 @@ func (m *processorMetrics) addHits(ctx context.Context, outcome string, n int) {
 	m.hits.Add(ctx, int64(n), metric.WithAttributes(attribute.String("outcome", outcome)))
 }
 
-// raidStats — счётчики по одному рейду пачки.
+// raidStats — итог обработки одного рейда пачки.
 type raidStats struct {
 	accepted, late, duplicate int
+	// totals и hpLeft заполнены, если приняты новые удары: это состояние для Redis.
+	totals []domain.PlayerDamage
+	hpLeft int64
+}
+
+// boardWriteTimeout ограничивает запись в Redis: медленный Redis не должен тормозить обработку ударов.
+const boardWriteTimeout = 500 * time.Millisecond
+
+// BoardWriter записывает состояние рейда в Redis (лидерборд, HP, pub/sub) после коммита в Postgres.
+type BoardWriter interface {
+	Apply(ctx context.Context, raidID uuid.UUID, totals []domain.PlayerDamage, hpLeft int64) error
 }
 
 // HitsProcessor применяет пачки ударов к Postgres (алгоритм 6.2 README).
@@ -82,6 +110,7 @@ type HitsProcessor struct {
 	hits        domain.HitsRepository
 	outbox      domain.OutboxRepository
 	eventsTopic string
+	board       BoardWriter
 	meters      metric.MeterProvider
 	metrics     *processorMetrics
 	now         func() time.Time
@@ -92,6 +121,11 @@ type ProcessorOption func(*HitsProcessor)
 // WithProcessorClock подменяет источник времени (для тестов).
 func WithProcessorClock(now func() time.Time) ProcessorOption {
 	return func(p *HitsProcessor) { p.now = now }
+}
+
+// WithBoard включает запись лидерборда и HP в Redis. Без неё процессор работает только с Postgres.
+func WithBoard(w BoardWriter) ProcessorOption {
+	return func(p *HitsProcessor) { p.board = w }
 }
 
 // WithProcessorMeterProvider подменяет провайдер метрик (для тестов).
@@ -150,10 +184,32 @@ func (p *HitsProcessor) ProcessBatch(ctx context.Context, batch []domain.Hit) (d
 		p.metrics.addHits(ctx, outcomeAccepted, stats.accepted)
 		p.metrics.addHits(ctx, outcomeLate, stats.late)
 		p.metrics.addHits(ctx, outcomeDuplicate, stats.duplicate)
+		p.applyToBoard(ctx, group.RaidID, stats)
 	}
 
 	p.metrics.duration.Record(ctx, time.Since(start).Seconds())
 	return result, nil
+}
+
+// applyToBoard обновляет Redis после коммита транзакции рейда (не внутри неё: откат не должен
+// оставлять в Redis данные, которых нет в Postgres).
+//
+// Ошибка Redis пачку не повторяет и не роняет: Postgres уже зафиксирован, а повтор пачки отсечёт
+// все удары по hit_id и до записи в Redis не дойдёт. Расхождение лечит raidctl rebuild-cache.
+func (p *HitsProcessor) applyToBoard(ctx context.Context, raidID uuid.UUID, stats raidStats) {
+	if p.board == nil || stats.accepted == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, boardWriteTimeout)
+	defer cancel()
+
+	start := time.Now()
+	err := p.board.Apply(ctx, raidID, stats.totals, stats.hpLeft)
+	p.metrics.boardDuration.Record(ctx, time.Since(start).Seconds())
+	if err != nil {
+		slog.Warn("redis board update failed, run raidctl rebuild-cache to repair", "raid_id", raidID, "err", err)
+		p.metrics.boardErrors.Add(ctx, 1)
+	}
 }
 
 func (p *HitsProcessor) processRaid(ctx context.Context, group domain.RaidHits) (raidStats, error) {
@@ -181,7 +237,12 @@ func (p *HitsProcessor) processRaid(ctx context.Context, group domain.RaidHits) 
 
 		out := domain.ApplyHits(state.HPLeft, fresh)
 		stats.accepted, stats.late = len(out.Accepted), len(out.Late)
-		return p.persist(ctx, group.RaidID, out)
+		totals, err := p.persist(ctx, group.RaidID, out)
+		if err != nil {
+			return err
+		}
+		stats.totals, stats.hpLeft = totals, out.HPLeft
+		return nil
 	})
 	return stats, err
 }
@@ -208,12 +269,15 @@ func (p *HitsProcessor) filterNew(ctx context.Context, hits []domain.Hit) ([]dom
 	return fresh, nil
 }
 
-func (p *HitsProcessor) persist(ctx context.Context, raidID uuid.UUID, out domain.HitsOutcome) error {
+func (p *HitsProcessor) persist(
+	ctx context.Context, raidID uuid.UUID, out domain.HitsOutcome,
+) ([]domain.PlayerDamage, error) {
 	if err := p.hits.InsertHits(ctx, out.Accepted); err != nil {
-		return err
+		return nil, err
 	}
-	if _, err := p.hits.AddDamage(ctx, raidID, domain.AggregateDamage(out.Accepted)); err != nil {
-		return err
+	totals, err := p.hits.AddDamage(ctx, raidID, domain.AggregateDamage(out.Accepted))
+	if err != nil {
+		return nil, err
 	}
 
 	var kill *domain.Kill
@@ -221,12 +285,12 @@ func (p *HitsProcessor) persist(ctx context.Context, raidID uuid.UUID, out domai
 		kill = &domain.Kill{PlayerID: out.Killing.PlayerID, HitID: out.Killing.ID, FinishedAt: p.now()}
 	}
 	if err := p.hits.UpdateHP(ctx, raidID, out.HPLeft, kill); err != nil {
-		return err
+		return nil, err
 	}
 	if kill == nil {
-		return nil
+		return totals, nil
 	}
-	return p.addDefeatedEvent(ctx, raidID, kill)
+	return totals, p.addDefeatedEvent(ctx, raidID, kill)
 }
 
 func (p *HitsProcessor) addDefeatedEvent(ctx context.Context, raidID uuid.UUID, kill *domain.Kill) error {

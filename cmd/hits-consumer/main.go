@@ -10,6 +10,7 @@ import (
 	"github.com/andrzej80/clan-raid-go/internal/kafka"
 	"github.com/andrzej80/clan-raid-go/internal/raid"
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
+	"github.com/andrzej80/clan-raid-go/internal/storage/rdb"
 )
 
 func main() {
@@ -35,8 +36,20 @@ func run(ctx context.Context, cfg *config.Config) error {
 	}
 	defer dbPool.Close()
 
+	if cfg.Redis.URL == "" {
+		return errors.New("REDIS_URL is required")
+	}
+	redisClient, err := rdb.New(ctx, &cfg.Redis)
+	if err != nil {
+		return err
+	}
+	// Закрывается после consumer.Close (defer выполняются в обратном порядке): пока партиции
+	// дообрабатывают пачки, запись в Redis ещё нужна.
+	defer func() { _ = redisClient.Close() }() //nolint:gosec // закрытие при выходе, ошибку обработать нечем
+
 	processor, err := raid.NewHitsProcessor(
-		pg.NewTxManager(dbPool), pg.NewHitsRepo(dbPool), pg.NewOutboxRepo(dbPool), cfg.Kafka.EventsTopic)
+		pg.NewTxManager(dbPool), pg.NewHitsRepo(dbPool), pg.NewOutboxRepo(dbPool), cfg.Kafka.EventsTopic,
+		raid.WithBoard(rdb.NewBoard(redisClient.Redis())))
 	if err != nil {
 		return err
 	}

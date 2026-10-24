@@ -26,12 +26,12 @@ type processorEnv struct {
 	players   []int64
 }
 
-func newProcessorEnv(t *testing.T, players int) *processorEnv {
+func newProcessorEnv(t *testing.T, players int, opts ...raid.ProcessorOption) *processorEnv {
 	t.Helper()
 
 	pool := requirePool(t)
 	processor, err := raid.NewHitsProcessor(
-		pg.NewTxManager(pool), pg.NewHitsRepo(pool), pg.NewOutboxRepo(pool), eventsTopic)
+		pg.NewTxManager(pool), pg.NewHitsRepo(pool), pg.NewOutboxRepo(pool), eventsTopic, opts...)
 	if err != nil {
 		t.Fatalf("NewHitsProcessor: %v", err)
 	}

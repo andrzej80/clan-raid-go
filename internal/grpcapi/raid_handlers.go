@@ -103,3 +103,23 @@ func (s *RaidService) Attack(
 		IsCrit: res.IsCrit,
 	}, nil
 }
+
+func (s *RaidService) GetLeaderboard(
+	ctx context.Context,
+	req *raidbossV1.GetLeaderboardRequest,
+) (*raidbossV1.GetLeaderboardResponse, error) {
+	id, err := uuid.Parse(req.GetRaidId())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "raid_id must be a valid UUID")
+	}
+
+	entries, err := s.board.Top(ctx, id, int(req.GetLimit()))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*raidbossV1.LeaderboardEntry, len(entries))
+	for i, e := range entries {
+		out[i] = &raidbossV1.LeaderboardEntry{PlayerId: e.PlayerID, TotalDamage: e.TotalDamage}
+	}
+	return &raidbossV1.GetLeaderboardResponse{Entries: out}, nil
+}

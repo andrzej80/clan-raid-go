@@ -26,6 +26,23 @@ func TestLoadKafkaConsumerDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadRedis(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://test@localhost/raidboss")
+	t.Setenv("REDIS_URL", "redis://redis:6379")
+	t.Setenv("REDIS_POOL_SIZE", "")
+	t.Setenv("REDIS_READ_TIMEOUT", "250ms")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	r := cfg.Redis
+	if r.URL != "redis://redis:6379" || r.PoolSize != 20 ||
+		r.DialTimeout != time.Second || r.ReadTimeout != 250*time.Millisecond || r.WriteTimeout != 500*time.Millisecond {
+		t.Fatalf("unexpected redis config: %+v", r)
+	}
+}
+
 func TestLoad(t *testing.T) {
 	t.Setenv("APP_HOST", "")
 	t.Setenv("APP_PORT", "")
