@@ -14,18 +14,23 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
+	"github.com/redis/go-redis/v9"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/andrzej80/clan-raid-go/internal/domain"
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
+	"github.com/andrzej80/clan-raid-go/internal/testutil"
 )
 
 const migrationsDir = "../../../migrations"
 
 // testPool общий для всех тестов пакета; nil, если Docker недоступен.
 var testPool *pgxpool.Pool
+
+// testRedis — Redis для тестов восстановления кэша и инварианта 6; nil, если контейнер не поднялся.
+var testRedis *redis.Client
 
 func TestMain(m *testing.M) {
 	os.Exit(run(m))
@@ -74,7 +79,26 @@ func run(m *testing.M) int {
 		fmt.Fprintln(os.Stderr, "migrations:", err)
 		return 1
 	}
+
+	if client, cleanup, err := testutil.StartRedis(ctx); err != nil {
+		if os.Getenv("REQUIRE_DOCKER") == "true" {
+			fmt.Fprintln(os.Stderr, "redis container unavailable, but REQUIRE_DOCKER=true:", err)
+			return 1
+		}
+		fmt.Fprintln(os.Stderr, "redis container unavailable, redis tests will be skipped:", err)
+	} else {
+		defer cleanup()
+		testRedis = client
+	}
 	return m.Run()
+}
+
+func requireRedis(t *testing.T) *redis.Client {
+	t.Helper()
+	if testRedis == nil {
+		t.Skip("redis is not available")
+	}
+	return testRedis
 }
 
 func requirePool(t *testing.T) *pgxpool.Pool {

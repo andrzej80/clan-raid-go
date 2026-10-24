@@ -19,3 +19,8 @@ func HPKey(raidID uuid.UUID) string { return "raid:" + raidID.String() + ":hp" }
 
 // UpdatesChannel — канал pub/sub обновлений рейда (читает WatchRaid).
 func UpdatesChannel(raidID uuid.UUID) string { return "raid:" + raidID.String() + ":updates" }
+
+// LeaderboardTmpKey — временный ZSET, из которого rebuild-cache атомарно (RENAME) подменяет лидерборд.
+func LeaderboardTmpKey(raidID uuid.UUID) string {
+	return LeaderboardKey(raidID) + ":rebuild:" + uuid.NewString()
+}

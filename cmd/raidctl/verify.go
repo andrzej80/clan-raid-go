@@ -14,6 +14,7 @@ import (
 
 	"github.com/andrzej80/clan-raid-go/internal/config"
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
+	"github.com/andrzej80/clan-raid-go/internal/storage/rdb"
 	"github.com/andrzej80/clan-raid-go/internal/verify"
 )
 
@@ -22,8 +23,19 @@ var errInvariantsViolated = errors.New("invariants violated")
 func runVerify(ctx context.Context, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	raidID := fs.String("raid", "", "check only this raid (default: all raids)")
+
+	// Redis проверяется, если задан REDIS_URL; --redis=false отключает проверку явно.
+	// Загрузка конфига до разбора флагов нужна ради значения по умолчанию.
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	checkRedis := fs.Bool("redis", cfg.Redis.URL != "", "also check invariant 6: Redis matches PostgreSQL (needs REDIS_URL; run after the load stopped)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *checkRedis && cfg.Redis.URL == "" {
+		return errors.New("--redis requires REDIS_URL")
 	}
 
 	var raidIDs []uuid.UUID
@@ -35,10 +47,6 @@ func runVerify(ctx context.Context, args []string, out io.Writer) error {
 		raidIDs = []uuid.UUID{id}
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
 	pool, err := pg.NewPool(ctx, &cfg.DB)
 	if err != nil {
 		return err
@@ -48,6 +56,19 @@ func runVerify(ctx context.Context, args []string, out io.Writer) error {
 	violations, err := verify.Run(ctx, pool, raidIDs)
 	if err != nil {
 		return err
+	}
+	if *checkRedis {
+		redisClient, err := rdb.New(ctx, &cfg.Redis)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = redisClient.Close() }() //nolint:gosec // закрытие при выходе, ошибку обработать нечем
+
+		redisViolations, err := verify.RunRedis(ctx, pool, redisClient.Redis(), raidIDs)
+		if err != nil {
+			return err
+		}
+		violations = append(violations, redisViolations...)
 	}
 	if len(violations) == 0 {
 		_, err = fmt.Fprintln(out, "OK: all invariants hold")
