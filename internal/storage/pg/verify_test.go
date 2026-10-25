@@ -128,3 +128,102 @@ func TestVerify_DetectsCorruption(t *testing.T) {
 		})
 	}
 }
+
+func verifyRewards(t *testing.T, env *processorEnv, raidID uuid.UUID, requireAll bool) []verify.Violation {
+	t.Helper()
+
+	v, err := verify.RunRewards(context.Background(), env.pool, []uuid.UUID{raidID}, requireAll)
+	if err != nil {
+		t.Fatalf("verify.RunRewards: %v", err)
+	}
+	return v
+}
+
+func TestVerify_RewardsConsistentAfterWorker(t *testing.T) {
+	t.Parallel()
+
+	env := newProcessorEnv(t, 2)
+	r := defeatedRaid(t, env)
+	if _, err := newRewardsProcessor(t, env).ProcessEvents(context.Background(),
+		[]domain.RaidEvent{{RaidID: r.ID, Kind: domain.RaidEventDefeated}}); err != nil {
+		t.Fatalf("ProcessEvents: %v", err)
+	}
+
+	if v := verifyRaid(t, env, r.ID); len(v) != 0 {
+		t.Fatalf("Run violations: %v", v)
+	}
+	if v := verifyRewards(t, env, r.ID, true); len(v) != 0 {
+		t.Fatalf("RunRewards violations: %v", v)
+	}
+}
+
+// До работы rewards-worker отсутствие наград — не ошибка, пока не включён requireAll.
+func TestVerify_RewardsNotYetGranted(t *testing.T) {
+	t.Parallel()
+
+	env := newProcessorEnv(t, 2)
+	r := defeatedRaid(t, env)
+
+	if v := verifyRewards(t, env, r.ID, false); len(v) != 0 {
+		t.Fatalf("violations without requireAll: %v", v)
+	}
+	if v := verifyRewards(t, env, r.ID, true); len(v) != 1 || v[0].Invariant != 0 {
+		t.Fatalf("violations with requireAll = %v, want one 'no rewards'", v)
+	}
+}
+
+func TestVerify_DetectsRewardCorruption(t *testing.T) {
+	t.Parallel()
+
+	grant := func(t *testing.T) (*processorEnv, *domain.Raid) {
+		t.Helper()
+		env := newProcessorEnv(t, 2)
+		r := defeatedRaid(t, env)
+		if _, err := newRewardsProcessor(t, env).ProcessEvents(context.Background(),
+			[]domain.RaidEvent{{RaidID: r.ID, Kind: domain.RaidEventDefeated}}); err != nil {
+			t.Fatalf("ProcessEvents: %v", err)
+		}
+		return env, r
+	}
+
+	t.Run("wrong amount", func(t *testing.T) {
+		t.Parallel()
+		env, r := grant(t)
+		env.exec(t, `UPDATE rewards SET amount = amount + 1 WHERE raid_id = $1 AND kind = 'top3' AND player_id = $2`,
+			r.ID, env.players[0])
+
+		if v := verifyRewards(t, env, r.ID, false); !invariants(v)[5] {
+			t.Fatalf("wrong amount not detected: %v", v)
+		}
+	})
+	t.Run("missing reward", func(t *testing.T) {
+		t.Parallel()
+		env, r := grant(t)
+		env.exec(t, `DELETE FROM rewards WHERE raid_id = $1 AND kind = 'killing_blow'`, r.ID)
+
+		if v := verifyRewards(t, env, r.ID, false); !invariants(v)[5] {
+			t.Fatalf("missing reward not detected: %v", v)
+		}
+	})
+	t.Run("extra reward", func(t *testing.T) {
+		t.Parallel()
+		env, r := grant(t)
+		env.exec(t, `INSERT INTO rewards (raid_id, player_id, kind, amount) VALUES ($1, $2, 'killing_blow', 250)`,
+			r.ID, env.players[1])
+
+		if v := verifyRewards(t, env, r.ID, false); !invariants(v)[5] {
+			t.Fatalf("extra reward not detected: %v", v)
+		}
+	})
+	t.Run("reward for a raid that is not defeated", func(t *testing.T) {
+		t.Parallel()
+		env := newProcessorEnv(t, 1)
+		active := env.newRaidWithHP(t, 100)
+		env.exec(t, `INSERT INTO rewards (raid_id, player_id, kind, amount) VALUES ($1, $2, 'participation', 100)`,
+			active.ID, env.players[0])
+
+		if v := verifyRaid(t, env, active.ID); !invariants(v)[5] {
+			t.Fatalf("reward for active raid not detected: %v", v)
+		}
+	})
+}

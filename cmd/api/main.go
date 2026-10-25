@@ -83,7 +83,9 @@ func run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	service := grpcapi.NewRaidService(raid.NewService(raidRepo), attacks, leaderboard)
+	catalog := pg.NewCatalogRepo(dbPool)
+	rewardsService := raid.NewRewardsService(catalog, pg.NewRewardsRepo(dbPool))
+	service := grpcapi.NewRaidService(raid.NewService(raidRepo), attacks, leaderboard, rewardsService)
 	// Лимит общий для всех экземпляров api (Redis). При сбое Redis лимит ослабляется до
 	// «на экземпляр» (Memory), но не пропадает; fail open остаётся только на случай ошибки обоих.
 	limiter := ratelimit.NewFallback(

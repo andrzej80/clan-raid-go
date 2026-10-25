@@ -23,6 +23,8 @@ var errInvariantsViolated = errors.New("invariants violated")
 func runVerify(ctx context.Context, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	raidID := fs.String("raid", "", "check only this raid (default: all raids)")
+	requireRewards := fs.Bool("require-rewards", false,
+		"also fail on defeated raids without rewards (run after rewards-worker drained raid.events)")
 
 	// Redis проверяется, если задан REDIS_URL; --redis=false отключает проверку явно.
 	// Загрузка конфига до разбора флагов нужна ради значения по умолчанию.
@@ -57,6 +59,11 @@ func runVerify(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	rewardViolations, err := verify.RunRewards(ctx, pool, raidIDs, *requireRewards)
+	if err != nil {
+		return err
+	}
+	violations = append(violations, rewardViolations...)
 	if *checkRedis {
 		redisClient, err := rdb.New(ctx, &cfg.Redis)
 		if err != nil {

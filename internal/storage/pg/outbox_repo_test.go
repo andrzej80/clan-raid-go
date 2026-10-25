@@ -134,3 +134,45 @@ func TestOutboxRepo_RollbackKeepsRecordsUnsent(t *testing.T) { //nolint:parallel
 		t.Fatalf("CountUnsent after rollback = %d, %v; want 2", n, err)
 	}
 }
+
+func TestOutboxRepo_ListFiltersAndOrder(t *testing.T) { //nolint:paralleltest // см. resetOutbox
+	pool := requirePool(t)
+	repo := pg.NewOutboxRepo(pool)
+	ctx := context.Background()
+
+	resetOutbox(t)
+	addOutbox(t, repo, t.Name()+"-a", 3)
+	addOutbox(t, repo, t.Name()+"-b", 2)
+
+	// Последние 4 записи в порядке возрастания id.
+	all, err := repo.List(ctx, pg.OutboxFilter{Limit: 4})
+	if err != nil || len(all) != 4 {
+		t.Fatalf("List = %d, %v; want 4", len(all), err)
+	}
+	if !slices.IsSortedFunc(all, func(a, b pg.OutboxRecord) int { return int(a.ID - b.ID) }) {
+		t.Fatalf("records must be in ascending id order: %v", all)
+	}
+	if all[len(all)-1].Key != t.Name()+"-b" {
+		t.Fatalf("last record key = %q, want the newest", all[len(all)-1].Key)
+	}
+
+	byKey, err := repo.List(ctx, pg.OutboxFilter{Key: t.Name() + "-a", Limit: 10})
+	if err != nil || len(byKey) != 3 {
+		t.Fatalf("List by key = %d, %v; want 3", len(byKey), err)
+	}
+
+	// Помечаем одну запись отправленной: фильтр --unsent её не показывает.
+	if err := repo.MarkSent(ctx, []int64{byKey[0].ID}); err != nil {
+		t.Fatalf("MarkSent: %v", err)
+	}
+	unsent, err := repo.List(ctx, pg.OutboxFilter{Unsent: true, Key: t.Name() + "-a", Limit: 10})
+	if err != nil || len(unsent) != 2 {
+		t.Fatalf("List unsent = %d, %v; want 2", len(unsent), err)
+	}
+	if none, err := repo.List(ctx, pg.OutboxFilter{Topic: "no.such.topic", Limit: 10}); err != nil || len(none) != 0 {
+		t.Fatalf("List by unknown topic = %d, %v; want 0", len(none), err)
+	}
+	if sent := byKey[0]; sent.SentAt != nil {
+		t.Fatal("record read before MarkSent must have no sent_at")
+	}
+}

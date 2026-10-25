@@ -227,3 +227,38 @@ func TestRewardsProcessor_ConcurrentWorkersGrantOnce(t *testing.T) {
 		t.Fatalf("outbox reward events = %d, want 5: each reward must be announced once", n)
 	}
 }
+
+func TestRewardsRepo_ListByPlayerNewestFirstAndLimited(t *testing.T) {
+	t.Parallel()
+
+	env := newProcessorEnv(t, 2)
+	first, second := defeatedRaid(t, env), defeatedRaid(t, env)
+	proc := newRewardsProcessor(t, env)
+	for _, r := range []*domain.Raid{first, second} { // награды первого рейда вставляются раньше
+		if _, err := proc.ProcessEvents(context.Background(),
+			[]domain.RaidEvent{{RaidID: r.ID, Kind: domain.RaidEventDefeated}}); err != nil {
+			t.Fatalf("ProcessEvents: %v", err)
+		}
+	}
+	repo := pg.NewRewardsRepo(env.pool)
+
+	all, err := repo.ListByPlayer(context.Background(), env.players[0], 100)
+	if err != nil {
+		t.Fatalf("ListByPlayer: %v", err)
+	}
+	// Игрок 0: участие, топ и убийство в каждом из двух рейдов.
+	if len(all) != 6 {
+		t.Fatalf("rewards = %d, want 6", len(all))
+	}
+	if all[0].RaidID != second.ID || all[5].RaidID != first.ID {
+		t.Fatalf("order: first=%s last=%s, want newest raid first", all[0].RaidID, all[5].RaidID)
+	}
+
+	limited, err := repo.ListByPlayer(context.Background(), env.players[0], 2)
+	if err != nil || len(limited) != 2 {
+		t.Fatalf("limited = %d, %v; want 2", len(limited), err)
+	}
+	if other, err := repo.ListByPlayer(context.Background(), -1, 10); err != nil || len(other) != 0 {
+		t.Fatalf("unknown player rewards = %d, %v; want 0", len(other), err)
+	}
+}

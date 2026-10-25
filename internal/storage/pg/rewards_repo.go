@@ -106,3 +106,36 @@ func (r *RewardsRepo) InsertRewards(
 	}
 	return inserted, nil
 }
+
+var _ domain.RewardsReader = (*RewardsRepo)(nil)
+
+// ListByPlayer идёт по индексу rewards(player_id, id DESC): новые награды первыми без сортировки.
+func (r *RewardsRepo) ListByPlayer(ctx context.Context, playerID int64, limit int) ([]domain.PlayerReward, error) {
+	rows, err := conn(ctx, r.pool).Query(ctx, `
+		SELECT raid_id, kind, amount
+		FROM rewards
+		WHERE player_id = $1
+		ORDER BY id DESC
+		LIMIT $2`, playerID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("select player rewards: %w", err)
+	}
+	defer rows.Close()
+
+	var out []domain.PlayerReward
+	for rows.Next() {
+		var (
+			rw   domain.PlayerReward
+			kind string
+		)
+		if err := rows.Scan(&rw.RaidID, &kind, &rw.Amount); err != nil {
+			return nil, fmt.Errorf("scan player reward: %w", err)
+		}
+		rw.Kind = domain.RewardKind(kind)
+		out = append(out, rw)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("select player rewards: %w", err)
+	}
+	return out, nil
+}

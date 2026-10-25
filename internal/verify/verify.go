@@ -80,6 +80,23 @@ var checks = []check{
 		  AND (d.raid_id IS NULL OR a.raid_id IS NULL OR d.total_damage <> a.total OR d.hits <> a.hits)
 		LIMIT ` + limit},
 
+	{5, "rewards exist only for defeated raids", `
+		SELECT rw.raid_id::text, format('%s reward(s) for a raid with status %s', count(*), r.status)
+		FROM rewards rw
+		JOIN raids r ON r.id = rw.raid_id
+		WHERE r.status <> 'defeated'
+		  AND ($1::uuid[] IS NULL OR rw.raid_id = ANY($1))
+		GROUP BY rw.raid_id, r.status
+		LIMIT ` + limit},
+
+	{5, "at most one reward per (raid, player, kind)", `
+		SELECT raid_id::text || '/player ' || player_id::text, format('%s rewards of kind %s', count(*), kind)
+		FROM rewards
+		WHERE ($1::uuid[] IS NULL OR raid_id = ANY($1))
+		GROUP BY raid_id, player_id, kind
+		HAVING count(*) > 1
+		LIMIT ` + limit},
+
 	{7, "at most one active raid per clan", `
 		SELECT clan_id::text, format('%s active raids', count(*))
 		FROM raids

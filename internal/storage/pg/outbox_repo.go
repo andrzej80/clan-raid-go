@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -85,4 +87,50 @@ func (r *OutboxRepo) CountUnsent(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("count unsent outbox: %w", err)
 	}
 	return n, nil
+}
+
+// OutboxFilter — условия выборки для raidctl outbox dump; нулевые поля не фильтруют.
+type OutboxFilter struct {
+	Unsent bool
+	Topic  string
+	Key    string
+	Limit  int
+}
+
+// OutboxRecord — запись outbox вместе со служебными полями.
+type OutboxRecord struct {
+	domain.OutboxEntry
+	CreatedAt time.Time
+	SentAt    *time.Time
+}
+
+// List возвращает последние f.Limit записей, подходящих под фильтр, в порядке возрастания id.
+func (r *OutboxRepo) List(ctx context.Context, f OutboxFilter) ([]OutboxRecord, error) {
+	rows, err := conn(ctx, r.pool).Query(ctx, `
+		SELECT id, topic, key, payload, headers, created_at, sent_at
+		FROM outbox
+		WHERE (NOT $1::bool OR sent_at IS NULL)
+		  AND ($2::text = '' OR topic = $2)
+		  AND ($3::text = '' OR key = $3)
+		ORDER BY id DESC
+		LIMIT $4`, f.Unsent, f.Topic, f.Key, f.Limit)
+	if err != nil {
+		return nil, fmt.Errorf("select outbox: %w", err)
+	}
+	defer rows.Close()
+
+	var out []OutboxRecord
+	for rows.Next() {
+		var rec OutboxRecord
+		if err := rows.Scan(&rec.ID, &rec.Topic, &rec.Key, &rec.Payload, &rec.Headers,
+			&rec.CreatedAt, &rec.SentAt); err != nil {
+			return nil, fmt.Errorf("scan outbox: %w", err)
+		}
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read outbox: %w", err)
+	}
+	slices.Reverse(out)
+	return out, nil
 }
