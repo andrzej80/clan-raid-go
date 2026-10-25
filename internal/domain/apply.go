@@ -2,6 +2,7 @@ package domain
 
 import (
 	"slices"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -31,6 +32,20 @@ func ApplyHits(hp int64, hits []Hit) HitsOutcome {
 		out.HPLeft = hp
 	}
 	return out
+}
+
+// SplitByDeadline делит удары на успевшие до окончания рейда и опоздавшие: удар, созданный
+// в момент endsAt или позже, не засчитывается (правило 6 README). Порядок сохраняется.
+func SplitByDeadline(hits []Hit, endsAt time.Time) (timely, late []Hit) {
+	timely = make([]Hit, 0, len(hits))
+	for _, h := range hits {
+		if h.CreatedAt.Before(endsAt) {
+			timely = append(timely, h)
+		} else {
+			late = append(late, h)
+		}
+	}
+	return timely, late
 }
 
 // DedupHits убирает повторы hit_id, сохраняя порядок и первое вхождение.

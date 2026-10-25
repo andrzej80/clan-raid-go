@@ -837,9 +837,13 @@ func (x *RaidFinished) GetKillerPlayerId() int64 {
 	return 0
 }
 
+// Игрок берётся из metadata "x-player-id"; возвращаются только его награды.
 type ListRewardsRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PlayerId      int64                  `protobuf:"varint,1,opt,name=player_id,json=playerId,proto3" json:"player_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Не используется: сервер игнорирует поле. Оставлено, чтобы не ломать совместимость схемы.
+	//
+	// Deprecated: Marked as deprecated in raidboss/v1/raid.proto.
+	PlayerId      int64 `protobuf:"varint,1,opt,name=player_id,json=playerId,proto3" json:"player_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -874,6 +878,7 @@ func (*ListRewardsRequest) Descriptor() ([]byte, []int) {
 	return file_raidboss_v1_raid_proto_rawDescGZIP(), []int{13}
 }
 
+// Deprecated: Marked as deprecated in raidboss/v1/raid.proto.
 func (x *ListRewardsRequest) GetPlayerId() int64 {
 	if x != nil {
 		return x.PlayerId
@@ -1034,9 +1039,9 @@ const file_raidboss_v1_raid_proto_rawDesc = "" +
 	"\x06update\"i\n" +
 	"\fRaidFinished\x12/\n" +
 	"\x06status\x18\x01 \x01(\x0e2\x17.raidboss.v1.RaidStatusR\x06status\x12(\n" +
-	"\x10killer_player_id\x18\x02 \x01(\x03R\x0ekillerPlayerId\"1\n" +
-	"\x12ListRewardsRequest\x12\x1b\n" +
-	"\tplayer_id\x18\x01 \x01(\x03R\bplayerId\"M\n" +
+	"\x10killer_player_id\x18\x02 \x01(\x03R\x0ekillerPlayerId\"5\n" +
+	"\x12ListRewardsRequest\x12\x1f\n" +
+	"\tplayer_id\x18\x01 \x01(\x03B\x02\x18\x01R\bplayerId\"M\n" +
 	"\x06Reward\x12\x17\n" +
 	"\araid_id\x18\x01 \x01(\tR\x06raidId\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x16\n" +

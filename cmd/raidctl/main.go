@@ -1,4 +1,4 @@
-// raidctl — служебный CLI: migrate, seed, verify, rebuild-cache (позже outbox dump).
+// raidctl — служебный CLI: migrate, seed, verify, rebuild-cache, outbox dump.
 package main
 
 import (
@@ -23,10 +23,12 @@ const usage = `usage: raidctl <command> [flags]
 commands:
   migrate apply SQL migrations (raidctl migrate --dir migrations)
   seed    create clans and players (raidctl seed --clans 100 --players 50)
-  verify  check invariants in PostgreSQL and Redis (raidctl verify [--raid <uuid>] [--redis=false]);
+  verify  check invariants in PostgreSQL and Redis (raidctl verify [--raid <uuid>] [--redis=false] [--require-rewards]);
           exit code 1 on violations
   rebuild-cache
           rebuild the Redis leaderboard and hp cache from PostgreSQL (raidctl rebuild-cache [--raid <uuid>])
+  outbox dump
+          print outbox records as JSON lines, payload decoded (raidctl outbox dump [--unsent] [--topic t] [--key k] [--limit 50])
 `
 
 func main() {
@@ -60,6 +62,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return runRebuildCache(ctx, args[1:], out)
 	case "seed":
 		return runSeed(ctx, args[1:], out)
+	case "outbox":
+		return runOutbox(ctx, args[1:], out)
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", args[0], usage)
 	}

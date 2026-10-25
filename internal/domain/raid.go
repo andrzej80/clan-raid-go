@@ -37,3 +37,16 @@ type Raid struct {
 	KillerPlayerID *int64
 	KillerHitID    *uuid.UUID
 }
+
+// ExpiredRaid — рейд, который scheduler только что перевёл в expired.
+type ExpiredRaid struct {
+	ID         uuid.UUID
+	HPLeft     int64
+	FinishedAt time.Time
+}
+
+type ExpiryRepository interface {
+	// ExpireDue переводит просроченные активные рейды в expired и возвращает их. Условие
+	// status = 'active' делает вызов безопасным из нескольких экземпляров: строку забирает один.
+	ExpireDue(ctx context.Context) ([]ExpiredRaid, error)
+}

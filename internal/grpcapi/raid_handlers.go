@@ -123,3 +123,29 @@ func (s *RaidService) GetLeaderboard(
 	}
 	return &raidbossV1.GetLeaderboardResponse{Entries: out}, nil
 }
+
+// ListRewards отдаёт награды игрока из x-player-id. Поле player_id запроса устарело и игнорируется:
+// чужие награды по подставленному id получить нельзя.
+func (s *RaidService) ListRewards(
+	ctx context.Context,
+	_ *raidbossV1.ListRewardsRequest,
+) (*raidbossV1.ListRewardsResponse, error) {
+	playerID, ok := interceptors.PlayerIDFromContext(ctx)
+	if !ok {
+		return nil, status.Error(codes.Unauthenticated, interceptors.PlayerIDHeader+" metadata is required")
+	}
+
+	rewards, err := s.rewards.List(ctx, playerID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*raidbossV1.Reward, len(rewards))
+	for i, r := range rewards {
+		out[i] = &raidbossV1.Reward{
+			RaidId: r.RaidID.String(),
+			Kind:   string(r.Kind),
+			Amount: int32(r.Amount), //nolint:gosec // награда ограничена правилами расчёта (< 2000)
+		}
+	}
+	return &raidbossV1.ListRewardsResponse{Rewards: out}, nil
+}

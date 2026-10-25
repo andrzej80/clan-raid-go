@@ -70,12 +70,6 @@ func failureReason(err error) string {
 	}
 }
 
-// Значения атрибута reason у счётчика DLQ.
-const (
-	dlqReasonDecode   = "decode"   // сообщение не разобралось как HitEvent
-	dlqReasonRejected = "rejected" // удар валиден, но применить его нельзя (нет игрока или рейда)
-)
-
 type consumerMetrics struct {
 	dlq          metric.Int64Counter
 	batchRetries metric.Int64Counter

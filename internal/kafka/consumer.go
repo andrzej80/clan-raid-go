@@ -10,13 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
-	"google.golang.org/protobuf/proto"
 
-	eventsV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/events/v1"
 	"github.com/andrzej80/clan-raid-go/internal/domain"
 )
 
@@ -32,6 +29,20 @@ const (
 	headerSourcePart   = "source-partition"
 	headerSourceOffset = "source-offset"
 )
+
+// BatchHandler обрабатывает пачку записей одной партиции. Ошибка — повторить пачку целиком
+// (повтор должен быть идемпотентным). Записи из результата консьюмер переносит в DLQ и только
+// после этого коммитит offset.
+type BatchHandler interface {
+	HandleBatch(ctx context.Context, records []*kgo.Record) ([]DLQRecord, error)
+}
+
+// DLQRecord — запись, которую нельзя обработать: она уходит в DLQ с причиной.
+type DLQRecord struct {
+	Record  *kgo.Record
+	Reason  string // короткая причина, попадает в метку метрики
+	Details string
+}
 
 // HitProcessor применяет пачку ударов. Ошибка — повторить пачку целиком (повтор идемпотентен);
 // удары из BatchResult.Rejected консьюмер переносит в DLQ.
@@ -54,10 +65,10 @@ type ConsumerConfig struct {
 // она копит пачку (до BatchSize записей или BatchTimeout), обрабатывает её и только после этого
 // коммитит offset. Автокоммит выключен: гарантия at-least-once.
 type Consumer struct {
-	client    *kgo.Client
-	processor HitProcessor
-	cfg       ConsumerConfig
-	metrics   *consumerMetrics
+	client  *kgo.Client
+	handler BatchHandler
+	cfg     ConsumerConfig
+	metrics *consumerMetrics
 
 	// workCtx живёт до Close: пачка, начатая при остановке, должна дообработаться, поэтому он
 	// не привязан к контексту Run (его отменяет сигнал).
@@ -73,7 +84,13 @@ type topicPartition struct {
 	partition int32
 }
 
+// NewConsumer создаёт консьюмер ударов: записи разбираются как HitEvent и передаются processor.
 func NewConsumer(cfg ConsumerConfig, processor HitProcessor, extra ...kgo.Opt) (*Consumer, error) {
+	return NewBatchConsumer(cfg, hitsHandler{processor: processor}, extra...)
+}
+
+// NewBatchConsumer создаёт консьюмер с произвольным обработчиком пачек.
+func NewBatchConsumer(cfg ConsumerConfig, handler BatchHandler, extra ...kgo.Opt) (*Consumer, error) {
 	switch {
 	case len(cfg.Brokers) == 0:
 		return nil, errors.New("kafka: no brokers configured")
@@ -88,7 +105,7 @@ func NewConsumer(cfg ConsumerConfig, processor HitProcessor, extra ...kgo.Opt) (
 	}
 
 	c := &Consumer{
-		processor:  processor,
+		handler:    handler,
 		cfg:        cfg,
 		metrics:    metrics,
 		partitions: make(map[topicPartition]*partitionWorker),
@@ -272,62 +289,42 @@ func (w *partitionWorker) handle(ctx context.Context, records []*kgo.Record) {
 	}
 }
 
-// handleBatch: разбор записей, обработка в Postgres, отправка негодных в DLQ, коммит offset'а.
+// handleBatch: обработка пачки, отправка негодных записей в DLQ, коммит offset'а.
 // Возвращает false, если пачку пришлось бросить (остановка) — тогда offset не коммитится.
 func (w *partitionWorker) handleBatch(ctx context.Context, records []*kgo.Record) bool {
-	c := w.consumer
-	hits := make([]domain.Hit, 0, len(records))
-	bySource := make(map[uuid.UUID]*kgo.Record, len(records))
-
-	for _, rec := range records {
-		hit, err := decodeHit(rec.Value)
-		if err != nil {
-			if !w.sendDLQ(ctx, rec, dlqReasonDecode, err.Error()) {
-				return false
-			}
-			continue
-		}
-		hits = append(hits, hit)
-		bySource[hit.ID] = rec
+	dead, ok := w.handleWithRetry(ctx, records)
+	if !ok {
+		return false
 	}
-
-	if len(hits) > 0 {
-		result, ok := w.processWithRetry(ctx, hits)
-		if !ok {
+	for _, d := range dead {
+		if !w.sendDLQ(ctx, d.Record, d.Reason, d.Details) {
 			return false
-		}
-		for _, rejected := range result.Rejected {
-			for _, hit := range rejected.Hits {
-				if !w.sendDLQ(ctx, bySource[hit.ID], dlqReasonRejected, rejected.Reason) {
-					return false
-				}
-			}
 		}
 	}
 
 	// Коммит — только после того, как эффект записан в БД. Ошибка коммита не фатальна: следующая
 	// пачка закоммитит дальше, а при повторной доставке отработает идемпотентность.
 	last := records[len(records)-1]
-	if err := c.client.CommitRecords(ctx, last); err != nil && ctx.Err() == nil {
+	if err := w.consumer.client.CommitRecords(ctx, last); err != nil && ctx.Err() == nil {
 		slog.Warn("kafka commit", "topic", w.tp.topic, "partition", w.tp.partition, "err", err)
 	}
 	return true
 }
 
-// processWithRetry повторяет пачку с экспоненциальной паузой, пока Postgres не ответит.
+// handleWithRetry повторяет пачку с экспоненциальной паузой, пока обработчик не справится.
 // Остановка (отмена контекста или отзыв партиции) прерывает повторы.
-func (w *partitionWorker) processWithRetry(ctx context.Context, hits []domain.Hit) (domain.BatchResult, bool) {
+func (w *partitionWorker) handleWithRetry(ctx context.Context, records []*kgo.Record) ([]DLQRecord, bool) {
 	backoff := retryBackoffMin
 	for {
-		result, err := w.consumer.processor.ProcessBatch(ctx, hits)
+		dead, err := w.consumer.handler.HandleBatch(ctx, records)
 		if err == nil {
-			return result, true
+			return dead, true
 		}
 		w.consumer.metrics.batchRetries.Add(ctx, 1)
-		slog.Error("process batch, will retry",
-			"topic", w.tp.topic, "partition", w.tp.partition, "hits", len(hits), "err", err)
+		slog.Error("handle batch, will retry",
+			"topic", w.tp.topic, "partition", w.tp.partition, "records", len(records), "err", err)
 		if !w.wait(ctx, backoff) {
-			return domain.BatchResult{}, false
+			return nil, false
 		}
 		backoff = min(backoff*2, retryBackoffMax)
 	}
@@ -378,32 +375,4 @@ func (w *partitionWorker) sendDLQ(ctx context.Context, src *kgo.Record, reason, 
 		}
 		backoff = min(backoff*2, retryBackoffMax)
 	}
-}
-
-// decodeHit разбирает и проверяет HitEvent. Любая ошибка — повод отправить запись в DLQ.
-func decodeHit(value []byte) (domain.Hit, error) {
-	var ev eventsV1.HitEvent
-	if err := proto.Unmarshal(value, &ev); err != nil {
-		return domain.Hit{}, fmt.Errorf("unmarshal hit event: %w", err)
-	}
-	hitID, err := uuid.Parse(ev.GetHitId())
-	if err != nil {
-		return domain.Hit{}, fmt.Errorf("hit_id: %w", err)
-	}
-	raidID, err := uuid.Parse(ev.GetRaidId())
-	if err != nil {
-		return domain.Hit{}, fmt.Errorf("raid_id: %w", err)
-	}
-	if ev.GetPlayerId() <= 0 || ev.GetDamage() <= 0 || ev.GetCreatedAt() == nil {
-		return domain.Hit{}, errors.New("player_id, damage and created_at must be set")
-	}
-	return domain.Hit{
-		ID:        hitID,
-		RaidID:    raidID,
-		PlayerID:  ev.GetPlayerId(),
-		ClanID:    ev.GetClanId(),
-		Damage:    int(ev.GetDamage()),
-		IsCrit:    ev.GetIsCrit(),
-		CreatedAt: ev.GetCreatedAt().AsTime(),
-	}, nil
 }

@@ -28,7 +28,7 @@ func (s *stubLeaderboard) Top(_ context.Context, _ uuid.UUID, limit int) ([]doma
 func newLeaderboardClient(t *testing.T, board *stubLeaderboard) raidbossV1.RaidServiceClient {
 	t.Helper()
 
-	conn := startTestServerWith(t, &config.Config{}, grpcapi.NewRaidService(nil, nil, board))
+	conn := startTestServerWith(t, &config.Config{}, grpcapi.NewRaidService(nil, nil, board, nil))
 	return raidbossV1.NewRaidServiceClient(conn)
 }
 
@@ -93,7 +93,7 @@ func TestAPI_GetLeaderboardRealServiceValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLeaderboardService: %v", err)
 	}
-	conn := startTestServerWith(t, &config.Config{}, grpcapi.NewRaidService(nil, nil, svc))
+	conn := startTestServerWith(t, &config.Config{}, grpcapi.NewRaidService(nil, nil, svc, nil))
 	client := raidbossV1.NewRaidServiceClient(conn)
 
 	_, err = client.GetLeaderboard(testCtx(t), &raidbossV1.GetLeaderboardRequest{RaidId: uuid.NewString(), Limit: -1})

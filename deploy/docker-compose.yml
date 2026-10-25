@@ -85,6 +85,7 @@ services:
         create raid.hits 12
         create raid.hits.dlq 1
         create raid.events 6
+        create raid.events.dlq 1
         create rewards.granted 6
 
   kafka-ui:
@@ -227,3 +228,78 @@ services:
         condition: service_started
       kafka-init:
         condition: service_completed_successfully
+  # Без container_name, чтобы relay масштабировался: docker compose up -d --scale outbox-relay=3.
+  # Экземпляры не мешают друг другу: записи берутся FOR UPDATE SKIP LOCKED.
+  outbox-relay:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      args:
+        SERVICE: outbox-relay
+    restart: unless-stopped
+    networks:
+      - app
+    environment:
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pg:5432/${POSTGRES_DB}
+      # Транзакция держит соединение на время отправки в Kafka; больше одной за раз relay не делает,
+      # запас нужен для метрики размера outbox.
+      - PG_MAX_CONNS=4
+      - KAFKA_BROKERS=kafka:9092
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=outbox-relay
+    depends_on:
+      pg:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+      kafka-init:
+        condition: service_completed_successfully
+  rewards-worker:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      args:
+        SERVICE: rewards-worker
+    container_name: rewards-worker
+    restart: unless-stopped
+    networks:
+      - app
+    environment:
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pg:5432/${POSTGRES_DB}
+      # По одной транзакции на партицию raid.events (6) плюс запас.
+      - PG_MAX_CONNS=8
+      - KAFKA_BROKERS=kafka:9092
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=rewards-worker
+    depends_on:
+      pg:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+      kafka-init:
+        condition: service_completed_successfully
+  scheduler:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      args:
+        SERVICE: scheduler
+    container_name: scheduler
+    restart: unless-stopped
+    networks:
+      - app
+    environment:
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pg:5432/${POSTGRES_DB}
+      - PG_MAX_CONNS=2
+      - SCHEDULER_INTERVAL=10s
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=scheduler
+    depends_on:
+      pg:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started

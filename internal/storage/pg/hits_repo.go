@@ -29,8 +29,8 @@ func (r *HitsRepo) LockRaid(ctx context.Context, id uuid.UUID) (domain.RaidState
 		status string
 	)
 	err := conn(ctx, r.pool).QueryRow(ctx,
-		`SELECT status, hp_left FROM raids WHERE id = $1 FOR UPDATE`, id,
-	).Scan(&status, &state.HPLeft)
+		`SELECT status, hp_left, ends_at FROM raids WHERE id = $1 FOR UPDATE`, id,
+	).Scan(&status, &state.HPLeft, &state.EndsAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.RaidState{}, domain.ErrRaidNotFound

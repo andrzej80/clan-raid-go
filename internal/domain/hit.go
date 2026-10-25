@@ -22,6 +22,7 @@ type Hit struct {
 type RaidState struct {
 	Status RaidStatus
 	HPLeft int64
+	EndsAt time.Time
 }
 
 // Kill — данные добивающего удара для перевода рейда в defeated.
@@ -67,4 +68,22 @@ type RejectedHits struct {
 // BatchResult — итог обработки пачки ударов.
 type BatchResult struct {
 	Rejected []RejectedHits
+}
+
+// OutboxEntry — запись outbox, прочитанная relay'ем.
+type OutboxEntry struct {
+	ID int64
+	OutboxMessage
+}
+
+// OutboxRelayStore — операции relay над таблицей outbox; LockUnsent и MarkSent вызываются
+// в одной транзакции TxManager.
+type OutboxRelayStore interface {
+	// LockUnsent блокирует до limit неотправленных записей (FOR UPDATE SKIP LOCKED) в порядке id.
+	// Записи, заблокированные другим relay'ем, пропускаются.
+	LockUnsent(ctx context.Context, limit int) ([]OutboxEntry, error)
+	// MarkSent помечает записи отправленными.
+	MarkSent(ctx context.Context, ids []int64) error
+	// CountUnsent возвращает число неотправленных записей (для метрики).
+	CountUnsent(ctx context.Context) (int64, error)
 }

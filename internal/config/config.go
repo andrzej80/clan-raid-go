@@ -38,7 +38,18 @@ const (
 	defaultHitsGroup    = "hits-consumer"
 	defaultBatchSize    = 500
 	defaultBatchTimeout = 50 * time.Millisecond
+
+	defaultEventsDLQTopic = "raid.events.dlq"
+	defaultRewardsTopic   = "rewards.granted"
+	defaultRewardsGroup   = "rewards-worker"
 )
+
+const (
+	defaultOutboxBatchSize    = 100
+	defaultOutboxPollInterval = 200 * time.Millisecond
+)
+
+const defaultSchedulerInterval = 10 * time.Second
 
 // KafkaConfig: Brokers может быть пустым (raidctl Kafka не нужна), api проверяет это при старте.
 type KafkaConfig struct {
@@ -47,10 +58,30 @@ type KafkaConfig struct {
 	HitsDLQTopic string
 	// EventsTopic — топик, куда outbox-relay переносит события рейдов; имя пишется в outbox.topic.
 	EventsTopic string
+	// EventsDLQTopic — куда rewards-worker складывает события рейдов, которые не удалось разобрать.
+	EventsDLQTopic string
+	// RewardsTopic — топик, куда rewards-worker через outbox публикует выданные награды.
+	RewardsTopic string
+	// RewardsGroup — consumer group rewards-worker.
+	RewardsGroup string
 	// ConsumerGroup и параметры пачки используются только hits-consumer.
 	ConsumerGroup string
 	BatchSize     int
 	BatchTimeout  time.Duration
+}
+
+// OutboxConfig — параметры outbox-relay.
+type OutboxConfig struct {
+	// BatchSize — сколько записей relay забирает за одну транзакцию.
+	BatchSize int
+	// PollInterval — пауза, когда неотправленных записей нет.
+	PollInterval time.Duration
+}
+
+// SchedulerConfig — параметры scheduler.
+type SchedulerConfig struct {
+	// Interval — как часто искать просроченные рейды.
+	Interval time.Duration
 }
 
 type Config struct {
@@ -58,8 +89,10 @@ type Config struct {
 	GRPCReflection bool
 	DB             pg.DbConfig
 	// Redis.URL может быть пустым (raidctl Redis не нужен), api проверяет это при старте.
-	Redis rdb.Config
-	Kafka KafkaConfig
+	Redis     rdb.Config
+	Kafka     KafkaConfig
+	Outbox    OutboxConfig
+	Scheduler SchedulerConfig
 }
 
 // PublicServices — сервисы, которым не нужна авторизация
@@ -110,7 +143,30 @@ func Load() (*Config, error) {
 	cfg.DB = db
 	cfg.Kafka = loadKafka()
 	cfg.Redis = loadRedis()
+	cfg.Outbox = loadOutbox()
+	cfg.Scheduler = SchedulerConfig{Interval: positiveDuration("SCHEDULER_INTERVAL", defaultSchedulerInterval)}
 	return cfg, nil
+}
+
+func loadOutbox() OutboxConfig {
+	batch := int(getEnvInt("OUTBOX_BATCH_SIZE", defaultOutboxBatchSize))
+	if batch < 1 {
+		batch = defaultOutboxBatchSize
+	}
+	return OutboxConfig{
+		BatchSize:    batch,
+		PollInterval: positiveDuration("OUTBOX_POLL_INTERVAL", defaultOutboxPollInterval),
+	}
+}
+
+// positiveDuration читает длительность из env; неположительное значение заменяется умолчанием:
+// нулевой интервал превратил бы цикл опроса в горячий.
+func positiveDuration(key string, defaultValue time.Duration) time.Duration {
+	if d := getEnvDuration(key, defaultValue); d > 0 {
+		return d
+	}
+	slog.Warn("Value is set to default", "valueName", key)
+	return defaultValue
 }
 
 func loadRedis() rdb.Config {
@@ -131,6 +187,22 @@ func loadKafka() KafkaConfig {
 		ConsumerGroup: defaultHitsGroup,
 		BatchSize:     int(getEnvInt("CONSUMER_BATCH_SIZE", defaultBatchSize)),
 		BatchTimeout:  getEnvDuration("CONSUMER_BATCH_TIMEOUT", defaultBatchTimeout),
+
+		EventsDLQTopic: defaultEventsDLQTopic,
+		RewardsTopic:   defaultRewardsTopic,
+		RewardsGroup:   defaultRewardsGroup,
+	}
+	if topic := os.Getenv("KAFKA_EVENTS_TOPIC"); topic != "" {
+		cfg.EventsTopic = topic
+	}
+	if topic := os.Getenv("KAFKA_EVENTS_DLQ_TOPIC"); topic != "" {
+		cfg.EventsDLQTopic = topic
+	}
+	if topic := os.Getenv("KAFKA_REWARDS_TOPIC"); topic != "" {
+		cfg.RewardsTopic = topic
+	}
+	if group := os.Getenv("REWARDS_CONSUMER_GROUP"); group != "" {
+		cfg.RewardsGroup = group
 	}
 	for broker := range strings.SplitSeq(os.Getenv("KAFKA_BROKERS"), ",") {
 		if broker = strings.TrimSpace(broker); broker != "" {

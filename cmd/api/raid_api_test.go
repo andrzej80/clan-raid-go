@@ -75,7 +75,7 @@ func (f *fakeRaids) GetRaid(_ context.Context, id uuid.UUID) (*domain.Raid, erro
 func newRaidClient(t *testing.T, repo domain.RaidRepository) raidbossV1.RaidServiceClient {
 	t.Helper()
 
-	conn := startTestServerWith(t, &config.Config{}, grpcapi.NewRaidService(raid.NewService(repo), nil, nil))
+	conn := startTestServerWith(t, &config.Config{}, grpcapi.NewRaidService(raid.NewService(repo), nil, nil, nil))
 	return raidbossV1.NewRaidServiceClient(conn)
 }
 
