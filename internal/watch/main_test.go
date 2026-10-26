@@ -26,6 +26,7 @@ type fakeFeeder struct {
 	sinks  map[uuid.UUID]func(*Update)
 	starts map[uuid.UUID]int
 	stops  map[uuid.UUID]int
+	gate   chan struct{} // если не nil, источник готов только после его закрытия
 }
 
 func newFakeFeeder() *fakeFeeder {
@@ -36,17 +37,24 @@ func newFakeFeeder() *fakeFeeder {
 	}
 }
 
-func (f *fakeFeeder) Start(raidID uuid.UUID, sink func(*Update)) func() {
+// Start возвращает готовый источник; если задан gate, источник готов, когда gate закрыт.
+func (f *fakeFeeder) Start(raidID uuid.UUID, sink func(*Update)) (stop func(), ready <-chan struct{}) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sinks[raidID] = sink
 	f.starts[raidID]++
+	ready = f.gate
+	if ready == nil {
+		closed := make(chan struct{})
+		close(closed)
+		ready = closed
+	}
 	return func() {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.stops[raidID]++
 		delete(f.sinks, raidID)
-	}
+	}, ready
 }
 
 // sink возвращает функцию доставки или nil, если источник рейда остановлен.

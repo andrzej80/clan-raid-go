@@ -13,6 +13,7 @@ package watch
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -24,6 +25,8 @@ import (
 const (
 	// DefaultBufferSize — размер буфера подписчика.
 	DefaultBufferSize = 16
+	// DefaultReadyTimeout — сколько Subscribe ждёт готовности источника.
+	DefaultReadyTimeout = 2 * time.Second
 	// DefaultInterval — минимальный интервал между обновлениями рейда (не чаще 4 раз в секунду).
 	DefaultInterval = 250 * time.Millisecond
 )
@@ -42,12 +45,14 @@ type Update = raidbossV1.WatchRaidResponse
 
 // Feeder — источник обновлений рейдов (Redis pub/sub).
 //
-// Start не блокируется и не вызывает sink до своего возврата. Возвращаемый stop тоже не
-// блокируется и не ждёт завершения уже начатых вызовов sink: hub вызывает его под своей
-// блокировкой, а sink в это время может ждать её же. sink может вызываться только из одной
-// горутины на рейд, порядок сообщений сохраняется.
+// Start не блокируется и не вызывает sink до своего возврата. ready закрывается, когда
+// подписка на источник действительно активна (для Redis — получено подтверждение SUBSCRIBE):
+// до этого момента обновления могут теряться. Возвращаемый stop тоже не блокируется и не ждёт
+// завершения уже начатых вызовов sink: hub вызывает его под своей блокировкой, а sink в это
+// время может ждать её же. sink может вызываться только из одной горутины на рейд, порядок
+// сообщений сохраняется.
 type Feeder interface {
-	Start(raidID uuid.UUID, sink func(*Update)) (stop func())
+	Start(raidID uuid.UUID, sink func(*Update)) (stop func(), ready <-chan struct{})
 }
 
 // Config настраивает hub.
@@ -57,6 +62,11 @@ type Config struct {
 	// Interval — минимальный интервал между обновлениями рейда; 0 — DefaultInterval,
 	// отрицательное значение отключает троттлинг.
 	Interval time.Duration
+	// ReadyTimeout — сколько Subscribe ждёт активации подписки на источник; 0 —
+	// DefaultReadyTimeout. По истечении подписчик всё равно получает подписку: потерянное
+	// обновление исправит следующее (hp_left абсолютный), а состояние на момент подключения
+	// клиент получает из snapshot.
+	ReadyTimeout time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -65,6 +75,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.Interval == 0 {
 		c.Interval = DefaultInterval
+	}
+	if c.ReadyTimeout <= 0 {
+		c.ReadyTimeout = DefaultReadyTimeout
 	}
 	return c
 }
@@ -97,9 +110,9 @@ func New(feeder Feeder, cfg Config) *Hub {
 	}
 }
 
-// Subscribe регистрирует подписчика. К моменту возврата подписка на источник уже запущена,
-// поэтому вызывающий читает snapshot из БД ПОСЛЕ Subscribe: обновления, пришедшие между
-// чтением и регистрацией, иначе были бы потеряны.
+// Subscribe регистрирует подписчика. К моменту возврата подписка на источник уже активна
+// (или истёк ReadyTimeout), поэтому вызывающий читает snapshot из БД ПОСЛЕ Subscribe:
+// обновления, пришедшие между чтением и регистрацией, иначе были бы потеряны.
 func (h *Hub) Subscribe(ctx context.Context, raidID uuid.UUID) (*Subscription, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -107,6 +120,18 @@ func (h *Hub) Subscribe(ctx context.Context, raidID uuid.UUID) (*Subscription, e
 	sub := newSubscription(h.cfg.BufferSize)
 	sub.release = func() { h.unsubscribe(raidID, sub) }
 
+	ready, err := h.register(raidID, sub)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.awaitReady(ctx, raidID, ready); err != nil {
+		sub.Close()
+		return nil, err
+	}
+	return sub, nil
+}
+
+func (h *Hub) register(raidID uuid.UUID, sub *Subscription) (<-chan struct{}, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
@@ -115,11 +140,29 @@ func (h *Hub) Subscribe(ctx context.Context, raidID uuid.UUID) (*Subscription, e
 	r := h.rooms[raidID]
 	if r == nil {
 		r = &hubRoom{room: newRoom(h.cfg.Interval)}
-		r.stopFeed = h.feeder.Start(raidID, func(u *Update) { h.publish(raidID, u) })
+		r.stopFeed, r.ready = h.feeder.Start(raidID, func(u *Update) { h.publish(raidID, u) })
 		h.rooms[raidID] = r
 	}
 	r.subs[sub] = struct{}{}
-	return sub, nil
+	return r.ready, nil
+}
+
+func (h *Hub) awaitReady(ctx context.Context, raidID uuid.UUID, ready <-chan struct{}) error {
+	select {
+	case <-ready:
+		return nil
+	default:
+	}
+	timer := time.NewTimer(h.cfg.ReadyTimeout)
+	defer timer.Stop()
+	select {
+	case <-ready:
+	case <-timer.C:
+		slog.Warn("watch source is not ready, subscribing anyway", "raid_id", raidID)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return nil
 }
 
 // Close останавливает hub: все подписчики получают ErrHubClosed. Идемпотентен.

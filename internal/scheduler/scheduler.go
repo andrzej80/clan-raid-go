@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/protobuf/proto"
@@ -28,7 +29,17 @@ type Config struct {
 	EventsTopic string
 	// MeterProvider необязателен: по умолчанию используется глобальный.
 	MeterProvider metric.MeterProvider
+	// Publisher необязателен: без него подписчики WatchRaid узнают об истечении только после переподключения.
+	Publisher ExpiredPublisher
 }
+
+// ExpiredPublisher сообщает подписчикам WatchRaid, что время рейда вышло.
+type ExpiredPublisher interface {
+	PublishExpired(ctx context.Context, raidID uuid.UUID) error
+}
+
+// publishTimeout ограничивает уведомление подписчиков: оно не должно тормозить проход.
+const publishTimeout = 500 * time.Millisecond
 
 // Scheduler раз в Interval переводит просроченные активные рейды в expired и в той же транзакции
 // пишет RaidEvent{expired} в outbox. Безопасен в нескольких экземплярах: UPDATE ... WHERE
@@ -100,7 +111,25 @@ func (s *Scheduler) ExpireOnce(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	s.metrics.expired.Add(ctx, int64(len(expired)))
+	s.publishExpired(ctx, expired)
 	return len(expired), nil
+}
+
+// publishExpired уведомляет подписчиков после коммита; ошибка не откатывает проход (best-effort,
+// клиент получит итог в snapshot при переподключении).
+func (s *Scheduler) publishExpired(ctx context.Context, expired []domain.ExpiredRaid) {
+	if s.cfg.Publisher == nil {
+		return
+	}
+	for _, raid := range expired {
+		pubCtx, cancel := context.WithTimeout(ctx, publishTimeout)
+		err := s.cfg.Publisher.PublishExpired(pubCtx, raid.ID)
+		cancel()
+		if err != nil {
+			slog.Warn("publish raid expired failed", "raid_id", raid.ID, "err", err)
+			s.metrics.errors.Add(ctx, 1)
+		}
+	}
 }
 
 func (s *Scheduler) addExpiredEvent(ctx context.Context, raid domain.ExpiredRaid) error {

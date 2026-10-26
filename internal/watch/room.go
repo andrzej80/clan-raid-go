@@ -14,7 +14,8 @@ import (
 type room struct {
 	subs     map[*Subscription]struct{}
 	stopFeed func()
-	timer    *time.Timer // таймер отложенной отправки; создаёт владелец по результату accept
+	ready    <-chan struct{} // закрывается, когда подписка на источник активна
+	timer    *time.Timer     // таймер отложенной отправки; создаёт владелец по результату accept
 	interval time.Duration
 
 	last     time.Time

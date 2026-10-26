@@ -26,9 +26,11 @@ const (
 )
 
 const (
-	defaultRedisPoolSize    = 20
-	defaultRedisDialTimeout = time.Second
-	defaultRedisIOTimeout   = 500 * time.Millisecond
+	defaultWatchBufferSize     = 16
+	defaultWatchUpdateInterval = 250 * time.Millisecond
+	defaultRedisPoolSize       = 20
+	defaultRedisDialTimeout    = time.Second
+	defaultRedisIOTimeout      = 500 * time.Millisecond
 )
 
 const (
@@ -78,6 +80,14 @@ type OutboxConfig struct {
 	PollInterval time.Duration
 }
 
+// WatchConfig — параметры стрима WatchRaid в api.
+type WatchConfig struct {
+	// BufferSize — размер буфера обновлений одного подписчика.
+	BufferSize int
+	// UpdateInterval — минимальный интервал между обновлениями одного рейда.
+	UpdateInterval time.Duration
+}
+
 // SchedulerConfig — параметры scheduler.
 type SchedulerConfig struct {
 	// Interval — как часто искать просроченные рейды.
@@ -93,6 +103,7 @@ type Config struct {
 	Kafka     KafkaConfig
 	Outbox    OutboxConfig
 	Scheduler SchedulerConfig
+	Watch     WatchConfig
 }
 
 // PublicServices — сервисы, которым не нужна авторизация
@@ -145,7 +156,19 @@ func Load() (*Config, error) {
 	cfg.Redis = loadRedis()
 	cfg.Outbox = loadOutbox()
 	cfg.Scheduler = SchedulerConfig{Interval: positiveDuration("SCHEDULER_INTERVAL", defaultSchedulerInterval)}
+	cfg.Watch = loadWatch()
 	return cfg, nil
+}
+
+func loadWatch() WatchConfig {
+	buffer := int(getEnvInt("WATCH_BUFFER_SIZE", defaultWatchBufferSize))
+	if buffer < 1 {
+		buffer = defaultWatchBufferSize
+	}
+	return WatchConfig{
+		BufferSize:     buffer,
+		UpdateInterval: positiveDuration("WATCH_UPDATE_INTERVAL", defaultWatchUpdateInterval),
+	}
 }
 
 func loadOutbox() OutboxConfig {

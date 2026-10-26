@@ -52,6 +52,10 @@ func (s *Subscription) Next(ctx context.Context) (*Update, error) {
 	}
 }
 
+// Done закрывается, когда подписка завершена (медленный клиент, Close, остановка hub);
+// причину возвращает Next.
+func (s *Subscription) Done() <-chan struct{} { return s.done }
+
 // Close отписывает клиента. Идемпотентен, вызывается через defer в обработчике RPC.
 func (s *Subscription) Close() {
 	s.kill(ErrClosed)

@@ -47,9 +47,10 @@ func run(ctx context.Context, cfg *config.Config) error {
 	// дообрабатывают пачки, запись в Redis ещё нужна.
 	defer func() { _ = redisClient.Close() }() //nolint:gosec // закрытие при выходе, ошибку обработать нечем
 
+	board := rdb.NewBoard(redisClient.Redis())
 	processor, err := raid.NewHitsProcessor(
 		pg.NewTxManager(dbPool), pg.NewHitsRepo(dbPool), pg.NewOutboxRepo(dbPool), cfg.Kafka.EventsTopic,
-		raid.WithBoard(rdb.NewBoard(redisClient.Redis())))
+		raid.WithBoard(board), raid.WithFinishPublisher(board))
 	if err != nil {
 		return err
 	}

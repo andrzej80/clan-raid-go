@@ -207,3 +207,59 @@ func TestHub_SlowSubscriberIsDroppedWithoutDelayingOthers(t *testing.T) {
 		t.Fatalf("fast got %d, want %d after the slow one was dropped", got, updates+1)
 	}
 }
+
+func TestHub_SubscribeWaitsForSourceToBeReady(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t, Config{Interval: -1})
+	gate := make(chan struct{})
+	fx.feeder.gate = gate
+
+	subscribed := make(chan *Subscription, 1)
+	go func() {
+		sub, err := fx.hub.Subscribe(t.Context(), uuid.New())
+		if err != nil {
+			t.Errorf("Subscribe: %v", err)
+		}
+		subscribed <- sub
+	}()
+
+	select {
+	case <-subscribed:
+		t.Fatal("Subscribe returned before the source was ready")
+	case <-time.After(40 * time.Millisecond):
+	}
+	close(gate)
+	sub := <-subscribed
+	if sub == nil {
+		t.Fatal("no subscription")
+	}
+	sub.Close()
+}
+
+func TestHub_SubscribeProceedsAfterReadyTimeout(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t, Config{Interval: -1, ReadyTimeout: 20 * time.Millisecond})
+	fx.feeder.gate = make(chan struct{}) // источник так и не готов
+
+	sub, err := fx.hub.Subscribe(t.Context(), uuid.New())
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	sub.Close()
+}
+
+func TestHub_SubscribeCanceledWhileWaitingLeavesNothingBehind(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t, Config{Interval: -1})
+	fx.feeder.gate = make(chan struct{})
+	raidID := uuid.New()
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+
+	if _, err := fx.hub.Subscribe(ctx, raidID); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Subscribe err = %v, want DeadlineExceeded", err)
+	}
+	if starts, stops := fx.feeder.counts(raidID); starts != 1 || stops != 1 {
+		t.Fatalf("starts=%d stops=%d, want the source stopped after the failed subscribe", starts, stops)
+	}
+}

@@ -338,3 +338,27 @@ func TestLoadScheduler(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadWatch(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://test@localhost/raidboss")
+	t.Setenv("WATCH_BUFFER_SIZE", "")
+	t.Setenv("WATCH_UPDATE_INTERVAL", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Watch.BufferSize != 16 || cfg.Watch.UpdateInterval != 250*time.Millisecond {
+		t.Fatalf("unexpected watch defaults: %+v", cfg.Watch)
+	}
+
+	t.Setenv("WATCH_BUFFER_SIZE", "64")
+	t.Setenv("WATCH_UPDATE_INTERVAL", "1s")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Watch.BufferSize != 64 || cfg.Watch.UpdateInterval != time.Second {
+		t.Fatalf("unexpected watch config: %+v", cfg.Watch)
+	}
+}
