@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -25,6 +26,7 @@ import (
 	"github.com/andrzej80/clan-raid-go/internal/ratelimit"
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
 	"github.com/andrzej80/clan-raid-go/internal/storage/rdb"
+	"github.com/andrzej80/clan-raid-go/internal/watch"
 )
 
 const (
@@ -68,6 +70,9 @@ func run(ctx context.Context, cfg *config.Config) error {
 	}
 	defer func() { _ = redisClient.Close() }() //nolint:gosec // закрытие при выходе, ошибку обработать нечем
 
+	hub, closeHub := newWatchHub(redisClient.Redis(), cfg.Watch)
+	defer closeHub()
+
 	producer, err := kafka.NewProducer(kafka.Config{Brokers: cfg.Kafka.Brokers, Topic: cfg.Kafka.HitsTopic})
 	if err != nil {
 		return err
@@ -85,7 +90,14 @@ func run(ctx context.Context, cfg *config.Config) error {
 	}
 	catalog := pg.NewCatalogRepo(dbPool)
 	rewardsService := raid.NewRewardsService(catalog, pg.NewRewardsRepo(dbPool))
-	service := grpcapi.NewRaidService(raid.NewService(raidRepo), attacks, leaderboard, rewardsService)
+	raids := raid.NewService(raidRepo)
+	service := grpcapi.NewRaidService(
+		grpcapi.WithRaids(grpcapi.NewRaidHandlers(raids)),
+		grpcapi.WithAttacks(grpcapi.NewAttackHandlers(attacks)),
+		grpcapi.WithLeaderboard(grpcapi.NewLeaderboardHandlers(leaderboard)),
+		grpcapi.WithRewards(grpcapi.NewRewardsHandlers(rewardsService)),
+		grpcapi.WithWatch(grpcapi.NewWatchHandlers(raids, leaderboard, hub)),
+	)
 	// Лимит общий для всех экземпляров api (Redis). При сбое Redis лимит ослабляется до
 	// «на экземпляр» (Memory), но не пропадает; fail open остаётся только на случай ошибки обоих.
 	limiter := ratelimit.NewFallback(
@@ -125,8 +137,22 @@ func run(ctx context.Context, cfg *config.Config) error {
 	}
 
 	slog.Info("Shutting down servers...")
+	// Стримы WatchRaid бесконечны: GracefulStop ждал бы их до таймаута. Остановка hub завершает
+	// их статусом UNAVAILABLE, клиент переподключится к другому экземпляру.
+	hub.Close()
 	shutdown(srv, closeKafka)
 	return nil
+}
+
+// newWatchHub создаёт hub стрима WatchRaid поверх Redis pub/sub. closeHub останавливает hub, а
+// затем источник: hub гасит подписки на рейды, и только после этого можно дождаться их горутин.
+func newWatchHub(rc redis.UniversalClient, cfg config.WatchConfig) (hub *watch.Hub, closeHub func()) {
+	updates := rdb.NewUpdates(rc)
+	hub = watch.New(updates, watch.Config{BufferSize: cfg.BufferSize, Interval: cfg.UpdateInterval})
+	return hub, func() {
+		hub.Close()
+		updates.Close()
+	}
 }
 
 // shutdown сначала останавливает gRPC-сервер, и только потом закрывает продюсера: идущие Attack

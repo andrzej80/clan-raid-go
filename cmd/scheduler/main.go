@@ -8,6 +8,7 @@ import (
 	"github.com/andrzej80/clan-raid-go/internal/config"
 	"github.com/andrzej80/clan-raid-go/internal/scheduler"
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
+	"github.com/andrzej80/clan-raid-go/internal/storage/rdb"
 )
 
 func main() {
@@ -27,8 +28,18 @@ func run(ctx context.Context, cfg *config.Config) error {
 	}
 	defer dbPool.Close()
 
-	s, err := scheduler.New(pg.NewTxManager(dbPool), pg.NewExpiryRepo(dbPool), pg.NewOutboxRepo(dbPool),
-		scheduler.Config{Interval: cfg.Scheduler.Interval, EventsTopic: cfg.Kafka.EventsTopic})
+	schedulerCfg := scheduler.Config{Interval: cfg.Scheduler.Interval, EventsTopic: cfg.Kafka.EventsTopic}
+	// Redis нужен только для уведомления подписчиков WatchRaid; без него scheduler работает как раньше.
+	if cfg.Redis.URL != "" {
+		redisClient, err := rdb.New(ctx, &cfg.Redis)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = redisClient.Close() }() //nolint:gosec // закрытие при выходе, ошибку обработать нечем
+		schedulerCfg.Publisher = rdb.NewBoard(redisClient.Redis())
+	}
+
+	s, err := scheduler.New(pg.NewTxManager(dbPool), pg.NewExpiryRepo(dbPool), pg.NewOutboxRepo(dbPool), schedulerCfg)
 	if err != nil {
 		return err
 	}

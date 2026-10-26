@@ -93,6 +93,8 @@ type raidStats struct {
 	// totals и hpLeft заполнены, если приняты новые удары: это состояние для Redis.
 	totals []domain.PlayerDamage
 	hpLeft int64
+	// killer заполнен, если эта пачка добила босса.
+	killer *int64
 }
 
 // boardWriteTimeout ограничивает запись в Redis: медленный Redis не должен тормозить обработку ударов.
@@ -103,6 +105,11 @@ type BoardWriter interface {
 	Apply(ctx context.Context, raidID uuid.UUID, totals []domain.PlayerDamage, hpLeft int64) error
 }
 
+// FinishPublisher сообщает подписчикам WatchRaid об окончании рейда.
+type FinishPublisher interface {
+	PublishDefeated(ctx context.Context, raidID uuid.UUID, killerPlayerID int64) error
+}
+
 // HitsProcessor применяет пачки ударов к Postgres (алгоритм 6.2 README).
 // Каждый рейд пачки обрабатывается в отдельной транзакции под FOR UPDATE.
 type HitsProcessor struct {
@@ -111,6 +118,7 @@ type HitsProcessor struct {
 	outbox      domain.OutboxRepository
 	eventsTopic string
 	board       BoardWriter
+	finished    FinishPublisher
 	meters      metric.MeterProvider
 	metrics     *processorMetrics
 	now         func() time.Time
@@ -126,6 +134,11 @@ func WithProcessorClock(now func() time.Time) ProcessorOption {
 // WithBoard включает запись лидерборда и HP в Redis. Без неё процессор работает только с Postgres.
 func WithBoard(w BoardWriter) ProcessorOption {
 	return func(p *HitsProcessor) { p.board = w }
+}
+
+// WithFinishPublisher включает уведомление подписчиков WatchRaid о победе над боссом.
+func WithFinishPublisher(f FinishPublisher) ProcessorOption {
+	return func(p *HitsProcessor) { p.finished = f }
 }
 
 // WithProcessorMeterProvider подменяет провайдер метрик (для тестов).
@@ -185,6 +198,7 @@ func (p *HitsProcessor) ProcessBatch(ctx context.Context, batch []domain.Hit) (d
 		p.metrics.addHits(ctx, outcomeLate, stats.late)
 		p.metrics.addHits(ctx, outcomeDuplicate, stats.duplicate)
 		p.applyToBoard(ctx, group.RaidID, stats)
+		p.publishDefeated(ctx, group.RaidID, stats)
 	}
 
 	p.metrics.duration.Record(ctx, time.Since(start).Seconds())
@@ -208,6 +222,20 @@ func (p *HitsProcessor) applyToBoard(ctx context.Context, raidID uuid.UUID, stat
 	p.metrics.boardDuration.Record(ctx, time.Since(start).Seconds())
 	if err != nil {
 		slog.Warn("redis board update failed, run raidctl rebuild-cache to repair", "raid_id", raidID, "err", err)
+		p.metrics.boardErrors.Add(ctx, 1)
+	}
+}
+
+// publishDefeated уведомляет подписчиков после коммита. Как и запись в Redis, это best-effort:
+// потерянное уведомление исправляет переподключение клиента (snapshot с итоговым статусом).
+func (p *HitsProcessor) publishDefeated(ctx context.Context, raidID uuid.UUID, stats raidStats) {
+	if p.finished == nil || stats.killer == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, boardWriteTimeout)
+	defer cancel()
+	if err := p.finished.PublishDefeated(ctx, raidID, *stats.killer); err != nil {
+		slog.Warn("publish raid defeated failed", "raid_id", raidID, "err", err)
 		p.metrics.boardErrors.Add(ctx, 1)
 	}
 }
@@ -247,6 +275,9 @@ func (p *HitsProcessor) processRaid(ctx context.Context, group domain.RaidHits) 
 			return err
 		}
 		stats.totals, stats.hpLeft = totals, out.HPLeft
+		if out.Killing != nil {
+			stats.killer = &out.Killing.PlayerID
+		}
 		return nil
 	})
 	return stats, err

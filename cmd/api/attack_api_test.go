@@ -90,7 +90,10 @@ func newAttackEnv(t *testing.T, limiter interceptors.Limiter) *attackEnv {
 	}
 	publisher := &recordingPublisher{}
 
-	svc := grpcapi.NewRaidService(raid.NewService(raids), raid.NewAttackService(raids, players, publisher), nil, nil)
+	svc := grpcapi.NewRaidService(
+		grpcapi.WithRaids(grpcapi.NewRaidHandlers(raid.NewService(raids))),
+		grpcapi.WithAttacks(grpcapi.NewAttackHandlers(raid.NewAttackService(raids, players, publisher))),
+	)
 	conn := startTestServerWithLimiter(t, &config.Config{}, svc, limiter)
 	return &attackEnv{
 		client:    raidbossV1.NewRaidServiceClient(conn),

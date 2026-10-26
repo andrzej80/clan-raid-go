@@ -180,3 +180,38 @@ func TestRun_FirstPassIsImmediateAndStopsOnCancel(t *testing.T) {
 		t.Fatal("Run did not stop after cancel")
 	}
 }
+
+type fakePublisher struct {
+	mu  sync.Mutex
+	ids []uuid.UUID
+	err error
+}
+
+func (p *fakePublisher) PublishExpired(_ context.Context, raidID uuid.UUID) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ids = append(p.ids, raidID)
+	return p.err
+}
+
+// Подписчиков WatchRaid уведомляют о каждом истёкшем рейде, а ошибка уведомления проход не ломает.
+func TestExpireOnce_NotifiesWatchers(t *testing.T) {
+	t.Parallel()
+
+	first, second := uuid.New(), uuid.New()
+	expiry := &fakeExpiry{due: []domain.ExpiredRaid{{ID: first}, {ID: second}}}
+	pub := &fakePublisher{err: errors.New("redis down")}
+	s, err := New(fakeTx{}, expiry, &fakeOutbox{},
+		Config{Interval: time.Second, EventsTopic: "raid.events", Publisher: pub})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	n, err := s.ExpireOnce(context.Background())
+	if err != nil || n != 2 {
+		t.Fatalf("ExpireOnce = %d, %v; want 2, nil despite the publisher failing", n, err)
+	}
+	if len(pub.ids) != 2 || pub.ids[0] != first || pub.ids[1] != second {
+		t.Fatalf("notified = %v, want both raids in order", pub.ids)
+	}
+}

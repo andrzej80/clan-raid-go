@@ -142,3 +142,62 @@ func TestDamageRepo_TopDamage(t *testing.T) {
 		t.Fatalf("top of unknown raid = %+v, err = %v, want empty", empty, err)
 	}
 }
+
+// recordingFinish запоминает уведомления о победе над боссом.
+type recordingFinish struct {
+	mu      sync.Mutex
+	killers map[uuid.UUID][]int64
+	err     error
+}
+
+func (f *recordingFinish) PublishDefeated(_ context.Context, raidID uuid.UUID, killerPlayerID int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.killers == nil {
+		f.killers = map[uuid.UUID][]int64{}
+	}
+	f.killers[raidID] = append(f.killers[raidID], killerPlayerID)
+	return f.err
+}
+
+func (f *recordingFinish) killersOf(raidID uuid.UUID) []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int64(nil), f.killers[raidID]...)
+}
+
+// О победе подписчиков уведомляют один раз, после коммита и только для пачки, добившей босса.
+func TestHitsProcessor_PublishesDefeatedOnce(t *testing.T) {
+	t.Parallel()
+
+	finish := &recordingFinish{}
+	env := newProcessorEnv(t, 2, raid.WithFinishPublisher(finish))
+	r := env.newRaidWithHP(t, 100)
+
+	mustProcess(t, env.processor, []domain.Hit{env.hit(r.ID, env.players[0], 40)})
+	if got := finish.killersOf(r.ID); len(got) != 0 {
+		t.Fatalf("killers = %v before the boss died, want none", got)
+	}
+
+	batch := []domain.Hit{env.hit(r.ID, env.players[1], 60)}
+	mustProcess(t, env.processor, batch)
+	mustProcess(t, env.processor, batch)                                           // повтор пачки
+	mustProcess(t, env.processor, []domain.Hit{env.hit(r.ID, env.players[0], 10)}) // рейд уже defeated
+
+	if got := finish.killersOf(r.ID); len(got) != 1 || got[0] != env.players[1] {
+		t.Fatalf("killers = %v, want exactly [%d]", got, env.players[1])
+	}
+}
+
+func TestHitsProcessor_FinishPublishFailureDoesNotFailBatch(t *testing.T) {
+	t.Parallel()
+
+	finish := &recordingFinish{err: errors.New("redis down")}
+	env := newProcessorEnv(t, 1, raid.WithFinishPublisher(finish))
+	r := env.newRaidWithHP(t, 100)
+
+	res, err := env.processor.ProcessBatch(context.Background(), []domain.Hit{env.hit(r.ID, env.players[0], 100)})
+	if err != nil || len(res.Rejected) != 0 {
+		t.Fatalf("ProcessBatch: err = %v, rejected = %+v, want success", err, res.Rejected)
+	}
+}

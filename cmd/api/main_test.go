@@ -38,7 +38,7 @@ func (f fakePinger) Ping(context.Context) error { return f.err }
 func startTestServer(t *testing.T, cfg *config.Config) *grpc.ClientConn {
 	t.Helper()
 
-	return startTestServerWith(t, cfg, grpcapi.NewRaidService(nil, nil, nil, nil))
+	return startTestServerWith(t, cfg, grpcapi.NewRaidService())
 }
 
 // allowAll — ограничитель, который никогда не отказывает: большинству тестов лимит не важен.
@@ -229,7 +229,10 @@ func TestShutdown_NoAcceptedHitIsLost(t *testing.T) {
 		Status: domain.RaidActive, StartedAt: time.Now().Add(-time.Hour), EndsAt: time.Now().Add(time.Hour),
 	}
 	players := fakePlayers{attackerID: {ID: attackerID, ClanID: attackerClan, Name: "p", Power: attackerPower}}
-	svc := grpcapi.NewRaidService(raid.NewService(raids), raid.NewAttackService(raids, players, publisher), nil, nil)
+	svc := grpcapi.NewRaidService(
+		grpcapi.WithRaids(grpcapi.NewRaidHandlers(raid.NewService(raids))),
+		grpcapi.WithAttacks(grpcapi.NewAttackHandlers(raid.NewAttackService(raids, players, publisher))),
+	)
 	conn, srv := startServer(t, &config.Config{}, svc, allowAll{})
 	client := raidbossV1.NewRaidServiceClient(conn)
 

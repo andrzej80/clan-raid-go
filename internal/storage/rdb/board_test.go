@@ -146,3 +146,71 @@ func TestBoard_ApplyPublishesHP(t *testing.T) {
 		t.Fatalf("published hp = %d, want 321", update.GetHpLeft())
 	}
 }
+
+func receiveUpdate(t *testing.T, ctx context.Context, sub *redis.PubSub) *raidbossV1.WatchRaidResponse {
+	t.Helper()
+	msg, err := sub.ReceiveMessage(ctx)
+	if err != nil {
+		t.Fatalf("ReceiveMessage: %v", err)
+	}
+	var update raidbossV1.WatchRaidResponse
+	if err := proto.Unmarshal([]byte(msg.Payload), &update); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return &update
+}
+
+func subscribeUpdates(t *testing.T, ctx context.Context, raidID uuid.UUID) *redis.PubSub {
+	t.Helper()
+	sub := testRedis.Subscribe(ctx, rdb.UpdatesChannel(raidID))
+	t.Cleanup(func() { _ = sub.Close() })
+	if _, err := sub.Receive(ctx); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	return sub
+}
+
+func TestBoard_ApplyPublishesLeaderboardAfterHP(t *testing.T) {
+	t.Parallel()
+	b, raidID := newBoard(t), uuid.New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sub := subscribeUpdates(t, ctx, raidID)
+
+	if err := b.Apply(ctx, raidID, []domain.PlayerDamage{dmg(1, 100), dmg(2, 300)}, 600); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	if hp := receiveUpdate(t, ctx, sub); hp.GetHpLeft() != 600 {
+		t.Fatalf("first update = %v, want hp_left=600", hp)
+	}
+	entries := receiveUpdate(t, ctx, sub).GetLeaderboard().GetEntries()
+	if len(entries) != 2 || entries[0].GetPlayerId() != 2 || entries[0].GetTotalDamage() != 300 ||
+		entries[1].GetPlayerId() != 1 {
+		t.Fatalf("leaderboard = %v, want players 2 (300) then 1 (100)", entries)
+	}
+}
+
+func TestBoard_PublishFinished(t *testing.T) {
+	t.Parallel()
+	b, raidID := newBoard(t), uuid.New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sub := subscribeUpdates(t, ctx, raidID)
+
+	if err := b.PublishDefeated(ctx, raidID, 7); err != nil {
+		t.Fatalf("PublishDefeated: %v", err)
+	}
+	if err := b.PublishExpired(ctx, raidID); err != nil {
+		t.Fatalf("PublishExpired: %v", err)
+	}
+
+	defeated := receiveUpdate(t, ctx, sub).GetFinished()
+	if defeated.GetStatus() != raidbossV1.RaidStatus_RAID_STATUS_DEFEATED || defeated.GetKillerPlayerId() != 7 {
+		t.Fatalf("defeated = %v", defeated)
+	}
+	expired := receiveUpdate(t, ctx, sub).GetFinished()
+	if expired.GetStatus() != raidbossV1.RaidStatus_RAID_STATUS_EXPIRED {
+		t.Fatalf("expired = %v", expired)
+	}
+}

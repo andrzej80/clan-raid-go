@@ -11,15 +11,30 @@ import (
 
 	raidbossV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/v1"
 	"github.com/andrzej80/clan-raid-go/internal/domain"
-	"github.com/andrzej80/clan-raid-go/internal/interceptors"
 	raidsvc "github.com/andrzej80/clan-raid-go/internal/raid"
 )
 
-func (s *RaidService) CreateRaid(
+// raidService — то, что транспорту нужно от бизнес-логики рейдов.
+type raidService interface {
+	Create(ctx context.Context, p raidsvc.CreateParams) (*domain.Raid, error)
+	Get(ctx context.Context, id uuid.UUID) (*domain.Raid, error)
+}
+
+// RaidHandlers — CreateRaid и GetRaid.
+type RaidHandlers struct {
+	raids raidService
+}
+
+func NewRaidHandlers(raids raidService) *RaidHandlers { return &RaidHandlers{raids: raids} }
+
+func (h *RaidHandlers) CreateRaid(
 	ctx context.Context,
 	req *raidbossV1.CreateRaidRequest,
 ) (*raidbossV1.CreateRaidResponse, error) {
-	raid, err := s.raids.Create(ctx, raidsvc.CreateParams{
+	if h == nil {
+		return nil, errNotEnabled
+	}
+	raid, err := h.raids.Create(ctx, raidsvc.CreateParams{
 		ClanID:   req.GetClanId(),
 		BossName: req.GetBossName(),
 		HPMax:    req.GetHpMax(),
@@ -31,16 +46,19 @@ func (s *RaidService) CreateRaid(
 	return &raidbossV1.CreateRaidResponse{Raid: raidToProto(raid)}, nil
 }
 
-func (s *RaidService) GetRaid(
+func (h *RaidHandlers) GetRaid(
 	ctx context.Context,
 	req *raidbossV1.GetRaidRequest,
 ) (*raidbossV1.GetRaidResponse, error) {
+	if h == nil {
+		return nil, errNotEnabled
+	}
 	id, err := uuid.Parse(req.GetRaidId())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "raid_id must be a valid UUID")
 	}
 
-	raid, err := s.raids.Get(ctx, id)
+	raid, err := h.raids.Get(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -70,82 +88,4 @@ func statusToProto(s domain.RaidStatus) raidbossV1.RaidStatus {
 	default:
 		return raidbossV1.RaidStatus_RAID_STATUS_UNSPECIFIED
 	}
-}
-
-func (s *RaidService) Attack(
-	ctx context.Context,
-	req *raidbossV1.AttackRequest,
-) (*raidbossV1.AttackResponse, error) {
-	raidID, err := uuid.Parse(req.GetRaidId())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, "raid_id must be a valid UUID")
-	}
-	key, err := uuid.Parse(req.GetIdempotencyKey())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, "idempotency_key must be a valid UUID")
-	}
-	playerID, ok := interceptors.PlayerIDFromContext(ctx)
-	if !ok {
-		return nil, status.Error(codes.Unauthenticated, interceptors.PlayerIDHeader+" metadata is required")
-	}
-
-	res, err := s.attacks.Attack(ctx, raidsvc.AttackParams{
-		RaidID:         raidID,
-		PlayerID:       playerID,
-		IdempotencyKey: key,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &raidbossV1.AttackResponse{
-		HitId:  res.HitID.String(),
-		Damage: int32(res.Damage), //nolint:gosec // урон ограничен силой игрока (≤ 1000 × 1.2 × 2)
-		IsCrit: res.IsCrit,
-	}, nil
-}
-
-func (s *RaidService) GetLeaderboard(
-	ctx context.Context,
-	req *raidbossV1.GetLeaderboardRequest,
-) (*raidbossV1.GetLeaderboardResponse, error) {
-	id, err := uuid.Parse(req.GetRaidId())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, "raid_id must be a valid UUID")
-	}
-
-	entries, err := s.board.Top(ctx, id, int(req.GetLimit()))
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*raidbossV1.LeaderboardEntry, len(entries))
-	for i, e := range entries {
-		out[i] = &raidbossV1.LeaderboardEntry{PlayerId: e.PlayerID, TotalDamage: e.TotalDamage}
-	}
-	return &raidbossV1.GetLeaderboardResponse{Entries: out}, nil
-}
-
-// ListRewards отдаёт награды игрока из x-player-id. Поле player_id запроса устарело и игнорируется:
-// чужие награды по подставленному id получить нельзя.
-func (s *RaidService) ListRewards(
-	ctx context.Context,
-	_ *raidbossV1.ListRewardsRequest,
-) (*raidbossV1.ListRewardsResponse, error) {
-	playerID, ok := interceptors.PlayerIDFromContext(ctx)
-	if !ok {
-		return nil, status.Error(codes.Unauthenticated, interceptors.PlayerIDHeader+" metadata is required")
-	}
-
-	rewards, err := s.rewards.List(ctx, playerID)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*raidbossV1.Reward, len(rewards))
-	for i, r := range rewards {
-		out[i] = &raidbossV1.Reward{
-			RaidId: r.RaidID.String(),
-			Kind:   string(r.Kind),
-			Amount: int32(r.Amount), //nolint:gosec // награда ограничена правилами расчёта (< 2000)
-		}
-	}
-	return &raidbossV1.ListRewardsResponse{Rewards: out}, nil
 }

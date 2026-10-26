@@ -27,7 +27,7 @@ func (s *stubRewards) List(_ context.Context, playerID int64) ([]domain.PlayerRe
 func newRewardsClient(t *testing.T, rewards *stubRewards) raidbossV1.RaidServiceClient {
 	t.Helper()
 
-	conn := startTestServerWith(t, &config.Config{}, grpcapi.NewRaidService(nil, nil, nil, rewards))
+	conn := startTestServerWith(t, &config.Config{}, grpcapi.NewRaidService(grpcapi.WithRewards(grpcapi.NewRewardsHandlers(rewards))))
 	return raidbossV1.NewRaidServiceClient(conn)
 }
 
