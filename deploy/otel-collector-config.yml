@@ -9,17 +9,31 @@ processors:
     check_interval: 1s
     limit_mib: 256
   tail_sampling:
+    # Решение принимается, когда с первого span'а трейса прошло decision_wait. Трейс удара идёт через
+    # Kafka и может приходить из разных сервисов, поэтому ждём с запасом.
     decision_wait: 5s
+    num_traces: 50000
+    expected_new_traces_per_sec: 1000
     policies:
+      # Серверные сбои: span со статусом Error (Internal, Unavailable, DeadlineExceeded и т.п.).
       - name: errors
         type: status_code
         status_code: { status_codes: [ERROR] }
+      # Ошибки клиента otelgrpc оставляет без статуса Error (FAILED_PRECONDITION, RESOURCE_EXHAUSTED,
+      # NOT_FOUND...), код лежит только в атрибуте. CANCELLED не берём: так заканчивается обычный
+      # стрим WatchRaid, каждый закрытый клиентом стрим не должен считаться ошибкой.
+      - name: grpc-errors
+        type: ottl_condition
+        ottl_condition:
+          error_mode: ignore
+          span:
+            - 'span.attributes["rpc.response.status_code"] != nil and span.attributes["rpc.response.status_code"] != "OK" and span.attributes["rpc.response.status_code"] != "CANCELLED"'
       - name: slow
         type: latency
         latency: { threshold_ms: 200 }
       - name: baseline
         type: probabilistic
-        probabilistic: { sampling_percentage: 100 }
+        probabilistic: { sampling_percentage: 5 }
   batch: {}
 
 exporters:

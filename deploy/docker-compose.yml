@@ -182,6 +182,7 @@ services:
       - KAFKA_BROKERS=kafka:9092
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 
       - OTEL_SERVICE_NAME=api
+      - OTEL_METRIC_EXPORT_INTERVAL=10000
     depends_on:
       pg:
         condition: service_healthy
@@ -217,6 +218,7 @@ services:
       - KAFKA_BROKERS=kafka:9092
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_SERVICE_NAME=hits-consumer
+      - OTEL_METRIC_EXPORT_INTERVAL=10000
     depends_on:
       pg:
         condition: service_healthy
@@ -247,6 +249,7 @@ services:
       - KAFKA_BROKERS=kafka:9092
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_SERVICE_NAME=outbox-relay
+      - OTEL_METRIC_EXPORT_INTERVAL=10000
     depends_on:
       pg:
         condition: service_healthy
@@ -273,6 +276,7 @@ services:
       - KAFKA_BROKERS=kafka:9092
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_SERVICE_NAME=rewards-worker
+      - OTEL_METRIC_EXPORT_INTERVAL=10000
     depends_on:
       pg:
         condition: service_healthy
@@ -299,6 +303,7 @@ services:
       - REDIS_URL=redis://redis:6379
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_SERVICE_NAME=scheduler
+      - OTEL_METRIC_EXPORT_INTERVAL=10000
     depends_on:
       pg:
         condition: service_healthy
