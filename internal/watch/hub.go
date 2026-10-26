@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/metric"
 
 	raidbossV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/v1"
 )
@@ -67,6 +68,8 @@ type Config struct {
 	// обновление исправит следующее (hp_left абсолютный), а состояние на момент подключения
 	// клиент получает из snapshot.
 	ReadyTimeout time.Duration
+	// MeterProvider необязателен: по умолчанию используется глобальный (см. telemetry.Setup).
+	MeterProvider metric.MeterProvider
 }
 
 func (c Config) withDefaults() Config {
@@ -95,6 +98,8 @@ type Hub struct {
 	mu     sync.RWMutex
 	rooms  map[uuid.UUID]*hubRoom
 	closed bool
+
+	metrics *hubMetrics
 }
 
 type hubRoom struct {
@@ -103,11 +108,29 @@ type hubRoom struct {
 }
 
 func New(feeder Feeder, cfg Config) *Hub {
-	return &Hub{
+	h := &Hub{
 		cfg:    cfg.withDefaults(),
 		feeder: feeder,
 		rooms:  make(map[uuid.UUID]*hubRoom),
 	}
+	metrics, err := newHubMetrics(cfg.MeterProvider, h)
+	if err != nil {
+		// Метрики не должны мешать раздаче обновлений.
+		slog.Warn("watch metrics disabled", "err", err)
+		metrics = noopHubMetrics()
+	}
+	h.metrics = metrics
+	return h
+}
+
+// counts возвращает число подписчиков и рейдов с подписчиками (для метрик).
+func (h *Hub) counts() (subscribers, rooms int64) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, r := range h.rooms {
+		subscribers += int64(len(r.subs))
+	}
+	return subscribers, int64(len(h.rooms))
 }
 
 // Subscribe регистрирует подписчика. К моменту возврата подписка на источник уже активна
@@ -119,6 +142,8 @@ func (h *Hub) Subscribe(ctx context.Context, raidID uuid.UUID) (*Subscription, e
 	}
 	sub := newSubscription(h.cfg.BufferSize)
 	sub.release = func() { h.unsubscribe(raidID, sub) }
+	// Вызывается из горутины источника при раздаче обновления: контекста запроса там нет.
+	sub.onSlow = func() { h.metrics.slowDisconnects.Add(context.Background(), 1) } //nolint:contextcheck // колбэк из горутины источника
 
 	ready, err := h.register(raidID, sub)
 	if err != nil {

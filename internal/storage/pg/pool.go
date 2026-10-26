@@ -41,5 +41,11 @@ func NewPool(ctx context.Context, cfg *DbConfig) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot create pool %w", err)
 	}
+	// Метрики пула: занятые и свободные соединения, число и время ожидания свободного соединения
+	// (pgxpool.empty_acquire*) — по ним видно голодание пула. Читаются при экспорте метрик.
+	if err := otelpgx.RecordStats(pool); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("cannot record pool stats %w", err)
+	}
 	return pool, nil
 }

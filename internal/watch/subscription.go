@@ -18,6 +18,7 @@ type Subscription struct {
 	ch      chan *Update
 	done    chan struct{} // закрывается при kill; ch не закрывается, чтобы offer не паниковал
 	release func()        // отписка в hub; задаётся hub'ом до выдачи подписки
+	onSlow  func()        // вызывается при отключении медленного клиента; задаётся hub'ом
 	once    sync.Once
 
 	mu      sync.Mutex
@@ -90,6 +91,9 @@ func (s *Subscription) offer(u *Update) {
 		s.pending = u
 	default:
 		s.killLocked(ErrSlowConsumer)
+		if s.onSlow != nil {
+			s.onSlow()
+		}
 	}
 }
 

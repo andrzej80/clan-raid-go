@@ -7,7 +7,10 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
@@ -60,5 +63,34 @@ func TestInjectHeadersNilMap(t *testing.T) { //nolint:paralleltest // меняе
 
 	if got := InjectHeaders(context.Background(), nil); len(got) != 0 {
 		t.Fatalf("no active span: headers = %v, want empty", got)
+	}
+}
+
+func TestDurationBucketsView(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader), sdkmetric.WithView(durationBucketsView()))
+	meter := mp.Meter("test")
+	seconds, _ := meter.Float64Histogram("d", metric.WithUnit("s"))
+	count, _ := meter.Int64Histogram("n", metric.WithUnit("{record}"))
+	seconds.Record(t.Context(), 0.002)
+	count.Record(t.Context(), 3)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(t.Context(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	for _, m := range rm.ScopeMetrics[0].Metrics {
+		switch data := m.Data.(type) {
+		case metricdata.Histogram[float64]:
+			if got := data.DataPoints[0].Bounds; len(got) != len(durationBuckets) || got[0] != 0.0005 {
+				t.Errorf("%s bounds = %v, want %v", m.Name, got, durationBuckets)
+			}
+		case metricdata.Histogram[int64]:
+			if got := data.DataPoints[0].Bounds; len(got) == len(durationBuckets) {
+				t.Errorf("%s (not seconds) must keep default bounds, got %v", m.Name, got)
+			}
+		}
 	}
 }

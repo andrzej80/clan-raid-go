@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -69,6 +70,7 @@ type Consumer struct {
 	handler BatchHandler
 	cfg     ConsumerConfig
 	metrics *consumerMetrics
+	lagReg  metric.Registration
 
 	// workCtx живёт до Close: пачка, начатая при остановке, должна дообработаться, поэтому он
 	// не привязан к контексту Run (его отменяет сигнал).
@@ -125,8 +127,13 @@ func NewBatchConsumer(cfg ConsumerConfig, handler BatchHandler, extra ...kgo.Opt
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 	}, extra...)
 
+	if c.lagReg, err = registerLagGauge(cfg.MeterProvider, c); err != nil {
+		return nil, err
+	}
+
 	c.client, err = kgo.NewClient(opts...)
 	if err != nil {
+		c.unregisterLag()
 		return nil, fmt.Errorf("kafka: new consumer client: %w", err)
 	}
 	return c, nil
@@ -146,10 +153,12 @@ func (c *Consumer) Run(ctx context.Context) error {
 			slog.Error("kafka fetch", "topic", topic, "partition", partition, "err", err)
 		})
 		fetches.EachPartition(func(p kgo.FetchTopicPartition) {
+			tp := topicPartition{p.Topic, p.Partition}
+			c.observeFetch(tp, p.HighWatermark, p.Records)
 			if len(p.Records) == 0 {
 				return
 			}
-			c.route(topicPartition{p.Topic, p.Partition}, p.Records)
+			c.route(tp, p.Records)
 		})
 	}
 }
@@ -182,6 +191,8 @@ func (c *Consumer) onAssigned(_ context.Context, _ *kgo.Client, assigned map[str
 				quit:     make(chan struct{}),
 				done:     make(chan struct{}),
 			}
+			w.highWatermark.Store(-1)
+			w.processed.Store(-1)
 			c.partitions[tp] = w
 			go w.run(c.workCtx) //nolint:contextcheck // горутина партиций живёт дольше колбэка ребаланса
 		}
@@ -223,6 +234,7 @@ func (c *Consumer) Ping(ctx context.Context) error { return c.client.Ping(ctx) }
 func (c *Consumer) Close() {
 	c.stopPartitions(nil)
 	c.cancelWork()
+	c.unregisterLag()
 	c.client.Close()
 }
 
@@ -232,6 +244,10 @@ type partitionWorker struct {
 	records  chan []*kgo.Record
 	quit     chan struct{} // закрывается при отзыве партиции или остановке
 	done     chan struct{} // закрывается, когда горутина завершилась
+
+	// Для метрики лага. Оба значения — "следующий offset"; -1 — ещё неизвестно.
+	highWatermark atomic.Int64 // конец партиции по последнему ответу брокера
+	processed     atomic.Int64 // offset, с которого начнётся необработанное
 }
 
 func (w *partitionWorker) run(ctx context.Context) {
@@ -302,9 +318,11 @@ func (w *partitionWorker) handleBatch(ctx context.Context, records []*kgo.Record
 		}
 	}
 
+	last := records[len(records)-1]
+	w.processed.Store(last.Offset + 1)
+
 	// Коммит — только после того, как эффект записан в БД. Ошибка коммита не фатальна: следующая
 	// пачка закоммитит дальше, а при повторной доставке отработает идемпотентность.
-	last := records[len(records)-1]
 	if err := w.consumer.client.CommitRecords(ctx, last); err != nil && ctx.Err() == nil {
 		slog.Warn("kafka commit", "topic", w.tp.topic, "partition", w.tp.partition, "err", err)
 	}
@@ -374,5 +392,41 @@ func (w *partitionWorker) sendDLQ(ctx context.Context, src *kgo.Record, reason, 
 			return false
 		}
 		backoff = min(backoff*2, retryBackoffMax)
+	}
+}
+
+// observeFetch запоминает конец партиции из ответа брокера (для метрики лага). Для партиции, у которой
+// ещё не было обработанных записей, точкой отсчёта служит начало первого полученного куска; пустой
+// ответ значит, что читать нечего и консьюмер догнал конец.
+func (c *Consumer) observeFetch(tp topicPartition, highWatermark int64, records []*kgo.Record) {
+	c.mu.Lock()
+	w := c.partitions[tp]
+	c.mu.Unlock()
+	if w == nil {
+		return
+	}
+	w.highWatermark.Store(highWatermark)
+	if w.processed.Load() >= 0 {
+		return
+	}
+	if len(records) > 0 {
+		w.processed.CompareAndSwap(-1, records[0].Offset)
+	} else {
+		w.processed.CompareAndSwap(-1, highWatermark)
+	}
+}
+
+// lag возвращает отставание партиции в записях; false, пока оно неизвестно.
+func (w *partitionWorker) lag() (int64, bool) {
+	hwm, processed := w.highWatermark.Load(), w.processed.Load()
+	if hwm < 0 || processed < 0 {
+		return 0, false
+	}
+	return max(hwm-processed, 0), true
+}
+
+func (c *Consumer) unregisterLag() {
+	if err := c.lagReg.Unregister(); err != nil {
+		slog.Warn("unregister kafka lag gauge", "err", err)
 	}
 }

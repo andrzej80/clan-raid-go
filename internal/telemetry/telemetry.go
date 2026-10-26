@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
@@ -44,6 +45,7 @@ func Setup(ctx context.Context) (func(context.Context) error, error) {
 	meterProvider := sdkmetric.NewMeterProvider(
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExp)),
 		sdkmetric.WithResource(res),
+		sdkmetric.WithView(durationBucketsView()),
 	)
 
 	otel.SetTracerProvider(tracerProvider)
@@ -51,6 +53,15 @@ func Setup(ctx context.Context) (func(context.Context) error, error) {
 	otel.SetTextMapPropagator(
 		propagation.NewCompositeTextMapPropagator(
 			propagation.TraceContext{}, propagation.Baggage{}))
+
+	// Метрики рантайма Go: горутины, куча, GC. Читаются при каждом экспорте.
+	if err := runtime.Start(runtime.WithMeterProvider(meterProvider)); err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("start runtime metrics: %w", err),
+			tracerProvider.Shutdown(ctx),
+			meterProvider.Shutdown(ctx),
+		)
+	}
 
 	return func(ctx context.Context) error {
 		return errors.Join(
@@ -80,4 +91,20 @@ func RecordError(span trace.Span, err error) {
 	}
 	span.RecordError(err)
 	span.SetStatus(codes.Error, err.Error())
+}
+
+// durationBuckets — границы гистограмм длительности в секундах. Корзины по умолчанию начинаются
+// с 5 мс, а типичный RPC и транзакция укладываются в 1–3 мс, то есть целиком в первую корзину,
+// и квантили на дашборде теряют смысл.
+var durationBuckets = []float64{
+	0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
+}
+
+// durationBucketsView применяет durationBuckets ко всем гистограммам в секундах, включая
+// rpc.server.call.duration из otelgrpc.
+func durationBucketsView() sdkmetric.View {
+	return sdkmetric.NewView(
+		sdkmetric.Instrument{Kind: sdkmetric.InstrumentKindHistogram, Unit: "s"},
+		sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{Boundaries: durationBuckets}},
+	)
 }
