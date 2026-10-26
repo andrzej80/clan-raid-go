@@ -5,14 +5,15 @@
 // свой буфер, а Send делает горутина RPC-обработчика, читая Subscription.Next. Поэтому
 // медленный клиент не может задержать остальных.
 //
-// Интерфейс Hub реализован дважды: ActorHub (состояние принадлежит одной горутине) и
-// MutexHub (состояние защищено sync.RWMutex). Поведение у них одинаковое, различается только
-// способ синхронизации.
+// Состояние защищено sync.RWMutex. Вариант с горутиной-владельцем состояния (actor) был
+// реализован и измерен, но проиграл на нагрузке с многими рейдами и при штормах
+// переподключений; сравнение — в docs/pr-stage-6.md.
 package watch
 
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,16 +39,6 @@ var (
 
 // Update — сообщение стрима.
 type Update = raidbossV1.WatchRaidResponse
-
-// Hub раздаёт обновления рейдов локальным подписчикам.
-type Hub interface {
-	// Subscribe регистрирует подписчика. К моменту возврата подписка на источник уже
-	// запущена, поэтому вызывающий читает snapshot из БД ПОСЛЕ Subscribe: обновления,
-	// пришедшие между чтением и регистрацией, иначе были бы потеряны.
-	Subscribe(ctx context.Context, raidID uuid.UUID) (*Subscription, error)
-	// Close останавливает hub: все подписчики получают ErrHubClosed. Идемпотентен.
-	Close()
-}
 
 // Feeder — источник обновлений рейдов (Redis pub/sub).
 //
@@ -76,4 +67,114 @@ func (c Config) withDefaults() Config {
 		c.Interval = DefaultInterval
 	}
 	return c
+}
+
+// Hub раздаёт обновления рейдов локальным подписчикам.
+//
+// mu защищает карту рейдов и множества подписчиков: раздача обновления идёт под RLock, то
+// есть рейды обрабатываются параллельно, а подписка и отписка берут Lock. hubRoom.mu
+// сериализует accept/flush/broadcast одного рейда, чтобы порядок обновлений не нарушался.
+// Блокировки берутся всегда в порядке mu → hubRoom.mu → Subscription.mu.
+type Hub struct {
+	cfg    Config
+	feeder Feeder
+
+	mu     sync.RWMutex
+	rooms  map[uuid.UUID]*hubRoom
+	closed bool
+}
+
+type hubRoom struct {
+	*room
+	mu sync.Mutex
+}
+
+func New(feeder Feeder, cfg Config) *Hub {
+	return &Hub{
+		cfg:    cfg.withDefaults(),
+		feeder: feeder,
+		rooms:  make(map[uuid.UUID]*hubRoom),
+	}
+}
+
+// Subscribe регистрирует подписчика. К моменту возврата подписка на источник уже запущена,
+// поэтому вызывающий читает snapshot из БД ПОСЛЕ Subscribe: обновления, пришедшие между
+// чтением и регистрацией, иначе были бы потеряны.
+func (h *Hub) Subscribe(ctx context.Context, raidID uuid.UUID) (*Subscription, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	sub := newSubscription(h.cfg.BufferSize)
+	sub.release = func() { h.unsubscribe(raidID, sub) }
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return nil, ErrHubClosed
+	}
+	r := h.rooms[raidID]
+	if r == nil {
+		r = &hubRoom{room: newRoom(h.cfg.Interval)}
+		r.stopFeed = h.feeder.Start(raidID, func(u *Update) { h.publish(raidID, u) })
+		h.rooms[raidID] = r
+	}
+	r.subs[sub] = struct{}{}
+	return sub, nil
+}
+
+// Close останавливает hub: все подписчики получают ErrHubClosed. Идемпотентен.
+func (h *Hub) Close() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return
+	}
+	h.closed = true
+	for id, r := range h.rooms {
+		r.shutdown(ErrHubClosed)
+		delete(h.rooms, id)
+	}
+}
+
+func (h *Hub) unsubscribe(raidID uuid.UUID, sub *Subscription) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	r := h.rooms[raidID]
+	if r == nil {
+		return
+	}
+	delete(r.subs, sub)
+	if len(r.subs) == 0 {
+		r.shutdown(nil)
+		delete(h.rooms, raidID)
+	}
+}
+
+// publish вызывается из горутины источника. RLock держится всю раздачу: Lock (отписка
+// последнего подписчика) не сможет убрать рейд, пока по нему идёт рассылка.
+func (h *Hub) publish(raidID uuid.UUID, u *Update) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	r := h.rooms[raidID]
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out, wait := r.accept(time.Now(), u)
+	if wait > 0 {
+		r.timer = time.AfterFunc(wait, func() { h.flush(raidID, r) })
+	}
+	r.broadcast(out)
+}
+
+func (h *Hub) flush(raidID uuid.UUID, r *hubRoom) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.rooms[raidID] != r {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.broadcast(r.flush(time.Now()))
 }

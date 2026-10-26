@@ -117,19 +117,3 @@ func expectSilence(t testing.TB, sub *Subscription) {
 		t.Fatalf("unexpected update %v", u)
 	}
 }
-
-// eventually ждёт выполнения условия без time.Sleep.
-func eventually(t testing.TB, cond func() bool) {
-	t.Helper()
-	timeout := time.NewTimer(waitTimeout)
-	defer timeout.Stop()
-	tick := time.NewTicker(time.Millisecond)
-	defer tick.Stop()
-	for !cond() {
-		select {
-		case <-timeout.C:
-			t.Fatal("condition not met in time")
-		case <-tick.C:
-		}
-	}
-}

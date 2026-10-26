@@ -12,7 +12,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// Бенчмарки сравнивают ActorHub и MutexHub:
+// Бенчмарки Hub (нужны, чтобы замечать регрессии производительности):
 //
 //	go test ./internal/watch -run '^$' -bench . -benchtime 100000x -cpu 1,4,12 -count 3
 //
@@ -39,12 +39,10 @@ func BenchmarkFanout(b *testing.B) {
 		{100, 10}, // типичная нагрузка
 		{1000, 1}, // много рейдов с одним зрителем
 	}
-	for _, impl := range hubImpls {
-		for _, sh := range shapes {
-			b.Run(fmt.Sprintf("%s/rooms=%d/subs=%d", impl.name, sh.rooms, sh.subs), func(b *testing.B) {
-				benchFanout(b, impl.make, sh.rooms, sh.subs)
-			})
-		}
+	for _, sh := range shapes {
+		b.Run(fmt.Sprintf("rooms=%d/subs=%d", sh.rooms, sh.subs), func(b *testing.B) {
+			benchFanout(b, sh.rooms, sh.subs)
+		})
 	}
 }
 
@@ -58,7 +56,7 @@ type fanoutBench struct {
 
 // subscribeAll подписывает subsPerRoom читателей на каждый рейд; читатель считает доставленное.
 func (fb *fanoutBench) subscribeAll(
-	ctx context.Context, b *testing.B, hub Hub, feeder *fakeFeeder, nRooms, subsPerRoom int,
+	ctx context.Context, b *testing.B, hub *Hub, feeder *fakeFeeder, nRooms, subsPerRoom int,
 ) {
 	b.Helper()
 	fb.rooms = make([]*benchRoom, nRooms)
@@ -122,9 +120,9 @@ func (fb *fanoutBench) waitDelivered() {
 	}
 }
 
-func benchFanout(b *testing.B, mk hubFactory, nRooms, subsPerRoom int) {
+func benchFanout(b *testing.B, nRooms, subsPerRoom int) {
 	feeder := newFakeFeeder()
-	hub := mk(feeder, Config{BufferSize: benchBuffer, Interval: -1})
+	hub := New(feeder, Config{BufferSize: benchBuffer, Interval: -1})
 	ctx, cancel := context.WithCancel(b.Context())
 
 	fb := &fanoutBench{subsCount: int64(subsPerRoom)}
@@ -148,19 +146,17 @@ func benchFanout(b *testing.B, mk hubFactory, nRooms, subsPerRoom int) {
 // BenchmarkSubscribeChurn измеряет подписку и отписку при параллельном потоке обновлений:
 // raids=1 — шторм переподключений к одному рейду после рестарта сервера.
 func BenchmarkSubscribeChurn(b *testing.B) {
-	for _, impl := range hubImpls {
-		for _, raids := range []int{1, 100} {
-			b.Run(fmt.Sprintf("%s/raids=%d", impl.name, raids), func(b *testing.B) {
-				benchChurn(b, impl.make, raids)
-			})
-		}
+	for _, raids := range []int{1, 100} {
+		b.Run(fmt.Sprintf("raids=%d", raids), func(b *testing.B) {
+			benchChurn(b, raids)
+		})
 	}
 }
 
 // startBackground запускает постоянного зрителя на каждом рейде (он держит рейд живым, чтобы
 // подписка не создавала источник заново на каждой итерации) и один публикатор, который обходит
 // рейды по кругу: сотня busy-loop горутин исказила бы замер.
-func startBackground(ctx context.Context, b *testing.B, hub Hub, feeder *fakeFeeder, ids []uuid.UUID) *sync.WaitGroup {
+func startBackground(ctx context.Context, b *testing.B, hub *Hub, feeder *fakeFeeder, ids []uuid.UUID) *sync.WaitGroup {
 	b.Helper()
 	var bg sync.WaitGroup
 	sinks := make([]func(*Update), 0, len(ids))
@@ -191,9 +187,9 @@ func startBackground(ctx context.Context, b *testing.B, hub Hub, feeder *fakeFee
 	return &bg
 }
 
-func benchChurn(b *testing.B, mk hubFactory, nRaids int) {
+func benchChurn(b *testing.B, nRaids int) {
 	feeder := newFakeFeeder()
-	hub := mk(feeder, Config{BufferSize: benchBuffer, Interval: -1})
+	hub := New(feeder, Config{BufferSize: benchBuffer, Interval: -1})
 
 	ids := make([]uuid.UUID, nRaids)
 	for i := range ids {
