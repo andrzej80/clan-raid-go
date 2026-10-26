@@ -6,12 +6,14 @@ import (
 	"fmt"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Setup настраивает трейсы и метрики: оба сигнала уходят по OTLP/gRPC в коллектор.
@@ -56,4 +58,26 @@ func Setup(ctx context.Context) (func(context.Context) error, error) {
 			meterProvider.Shutdown(ctx),
 		)
 	}, nil
+}
+
+// InjectHeaders кладёт trace-контекст из ctx в заголовки записи outbox и возвращает их. Relay переносит
+// заголовки в Kafka как есть, поэтому цепочка трейса не рвётся на пути БД → relay → следующий консьюмер.
+// Переданная мапа изменяется на месте; при nil создаётся новая, поэтому используйте результат.
+// Без активного span'а (или без настроенного провайдера) заголовки не меняются.
+func InjectHeaders(ctx context.Context, headers map[string]string) map[string]string {
+	if headers == nil {
+		headers = make(map[string]string, 1)
+	}
+	otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(headers))
+	return headers
+}
+
+// RecordError помечает span ошибочным и сохраняет ошибку в нём. Для nil ничего не делает,
+// поэтому его можно вызывать на любом выходе без проверки.
+func RecordError(span trace.Span, err error) {
+	if err == nil {
+		return
+	}
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
 }

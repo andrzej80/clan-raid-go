@@ -16,6 +16,7 @@ import (
 
 	eventsV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/events/v1"
 	"github.com/andrzej80/clan-raid-go/internal/domain"
+	"github.com/andrzej80/clan-raid-go/internal/telemetry"
 )
 
 const processorMeterName = "github.com/andrzej80/clan-raid-go/internal/raid"
@@ -341,10 +342,12 @@ func (p *HitsProcessor) addDefeatedEvent(ctx context.Context, raidID uuid.UUID, 
 	if err != nil {
 		return fmt.Errorf("marshal raid defeated event: %w", err)
 	}
+	headers := map[string]string{"type": eventTypeRaidDefeated}
+	headers = telemetry.InjectHeaders(ctx, headers)
 	return p.outbox.Add(ctx, domain.OutboxMessage{
 		Topic:   p.eventsTopic,
 		Key:     raidID.String(),
 		Payload: payload,
-		Headers: map[string]string{"type": eventTypeRaidDefeated},
+		Headers: headers,
 	})
 }

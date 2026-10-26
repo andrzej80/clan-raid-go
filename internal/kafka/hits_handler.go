@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/protobuf/proto"
 
 	eventsV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/events/v1"
@@ -24,8 +25,10 @@ type hitsHandler struct {
 	processor HitProcessor
 }
 
-func (h hitsHandler) HandleBatch(ctx context.Context, records []*kgo.Record) ([]DLQRecord, error) {
-	var dead []DLQRecord
+func (h hitsHandler) HandleBatch(ctx context.Context, records []*kgo.Record) (dead []DLQRecord, err error) {
+	ctx, bt := startBatchTrace(ctx, "raid.hits process batch", records)
+	defer func() { bt.end(err) }()
+
 	hits := make([]domain.Hit, 0, len(records))
 	bySource := make(map[uuid.UUID]*kgo.Record, len(records))
 
@@ -37,6 +40,8 @@ func (h hitsHandler) HandleBatch(ctx context.Context, records []*kgo.Record) ([]
 		}
 		hits = append(hits, hit)
 		bySource[hit.ID] = rec
+		bt.record(rec, "raid.hits process hit",
+			attribute.String("hit_id", hit.ID.String()), attribute.String("raid_id", hit.RaidID.String()))
 	}
 	if len(hits) == 0 {
 		return dead, nil
