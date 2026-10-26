@@ -383,7 +383,8 @@ func (w *partitionWorker) sendDLQ(ctx context.Context, src *kgo.Record, reason, 
 		err := c.client.ProduceSync(ctx, dlq).FirstErr()
 		if err == nil {
 			c.metrics.dlq.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
-			slog.Warn("record sent to dlq", "reason", reason, "details", details,
+			// Лог привязан к трейсу отправителя: из DLQ-записи видно, какой запрос её породил.
+			slog.WarnContext(extractTrace(ctx, src), "record sent to dlq", "reason", reason, "details", details,
 				"topic", src.Topic, "partition", src.Partition, "offset", src.Offset)
 			return true
 		}

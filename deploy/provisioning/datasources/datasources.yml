@@ -1,5 +1,7 @@
 apiVersion: 1
 
+# $$ — экранирование: Grafana подставляет ${...} из окружения при чтении файла, а переменные
+# ${__value.raw}, ${__tags}, ${__span.traceId} разворачивает уже сама в запросах.
 datasources:
   - name: VictoriaMetrics
     uid: victoriametrics
@@ -18,3 +20,32 @@ datasources:
     access: proxy
     url: http://tempo:3200
     editable: true
+    jsonData:
+      # Из span'а — к логам сервиса за это же время, отфильтрованным по trace_id.
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: '-1m'
+        spanEndTimeShift: '1m'
+        tags:
+          - key: service.name
+            value: service_name
+        filterByTraceID: false
+        filterBySpanID: false
+        customQuery: true
+        query: '{$${__tags}} | trace_id="$${__span.traceId}"'
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: true
+    jsonData:
+      # Из записи лога — к её трейсу в Tempo. OTLP кладёт trace_id в structured metadata.
+      derivedFields:
+        - name: TraceID
+          matcherType: label
+          matcherRegex: trace_id
+          url: '$${__value.raw}'
+          datasourceUid: tempo
+          urlDisplayLabel: Open trace

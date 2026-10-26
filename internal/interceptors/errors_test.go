@@ -39,7 +39,7 @@ func TestToStatus(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := status.Code(toStatus(tc.err)); got != tc.want {
+			if got := status.Code(toStatus(t.Context(), tc.err)); got != tc.want {
 				t.Fatalf("code = %v, want %v", got, tc.want)
 			}
 		})

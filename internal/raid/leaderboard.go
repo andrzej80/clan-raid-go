@@ -127,7 +127,7 @@ func (s *LeaderboardService) Top(ctx context.Context, raidID uuid.UUID, limit in
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		slog.Warn("leaderboard: redis read failed, falling back to postgres", "raid_id", raidID, "err", err)
+		slog.WarnContext(ctx, "leaderboard: redis read failed, falling back to postgres", "raid_id", raidID, "err", err)
 		s.countFallback(ctx, fallbackReasonError)
 	case len(entries) == 0 && raid.HPLeft < raid.HPMax:
 		// Урон уже нанесён, а лидерборд пуст: Redis потерял данные (сброс, рестарт без persistence).

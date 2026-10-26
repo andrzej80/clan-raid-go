@@ -186,7 +186,7 @@ func (p *HitsProcessor) ProcessBatch(ctx context.Context, batch []domain.Hit) (d
 		case errors.Is(err, domain.ErrPlayerNotFound), errors.Is(err, domain.ErrRaidNotFound):
 			// Повтор не поможет: рейда или игрока нет. API проверяет их до отправки в очередь,
 			// поэтому сюда попадают только битые данные.
-			slog.Warn("hits rejected", "raid_id", group.RaidID, "hits", len(group.Hits), "err", err)
+			slog.WarnContext(ctx, "hits rejected", "raid_id", group.RaidID, "hits", len(group.Hits), "err", err)
 			p.metrics.addHits(ctx, outcomeRejected, len(group.Hits))
 			result.Rejected = append(result.Rejected, domain.RejectedHits{
 				RaidID: group.RaidID, Hits: group.Hits, Reason: err.Error(),
@@ -222,7 +222,7 @@ func (p *HitsProcessor) applyToBoard(ctx context.Context, raidID uuid.UUID, stat
 	err := p.board.Apply(ctx, raidID, stats.totals, stats.hpLeft)
 	p.metrics.boardDuration.Record(ctx, time.Since(start).Seconds())
 	if err != nil {
-		slog.Warn("redis board update failed, run raidctl rebuild-cache to repair", "raid_id", raidID, "err", err)
+		slog.WarnContext(ctx, "redis board update failed, run raidctl rebuild-cache to repair", "raid_id", raidID, "err", err)
 		p.metrics.boardErrors.Add(ctx, 1)
 	}
 }
@@ -236,7 +236,7 @@ func (p *HitsProcessor) publishDefeated(ctx context.Context, raidID uuid.UUID, s
 	ctx, cancel := context.WithTimeout(ctx, boardWriteTimeout)
 	defer cancel()
 	if err := p.finished.PublishDefeated(ctx, raidID, *stats.killer); err != nil {
-		slog.Warn("publish raid defeated failed", "raid_id", raidID, "err", err)
+		slog.WarnContext(ctx, "publish raid defeated failed", "raid_id", raidID, "err", err)
 		p.metrics.boardErrors.Add(ctx, 1)
 	}
 }

@@ -21,7 +21,7 @@ func UnaryErrorMapper(
 	handler grpc.UnaryHandler,
 ) (any, error) {
 	resp, err := handler(ctx, req)
-	return resp, toStatus(err)
+	return resp, toStatus(ctx, err)
 }
 
 func StreamErrorMapper(
@@ -30,10 +30,10 @@ func StreamErrorMapper(
 	_ *grpc.StreamServerInfo,
 	handler grpc.StreamHandler,
 ) error {
-	return toStatus(handler(srv, ss))
+	return toStatus(streamContext(ss), handler(srv, ss))
 }
 
-func toStatus(err error) error {
+func toStatus(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
@@ -62,7 +62,7 @@ func toStatus(err error) error {
 	case errors.Is(err, context.Canceled):
 		return status.Error(codes.Canceled, err.Error())
 	default:
-		slog.Error("internal error", "err", err)
+		slog.ErrorContext(ctx, "internal error", "err", err)
 		return status.Error(codes.Internal, "internal error")
 	}
 }

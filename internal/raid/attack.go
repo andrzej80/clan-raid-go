@@ -127,7 +127,7 @@ func (s *AttackService) Attack(ctx context.Context, p AttackParams) (AttackResul
 		CreatedAt: now.UTC(),
 	}
 	if err := s.publisher.Publish(ctx, hit); err != nil {
-		return AttackResult{}, publishError(err)
+		return AttackResult{}, publishError(ctx, err)
 	}
 
 	return AttackResult{HitID: hit.ID, Damage: damage, IsCrit: isCrit}, nil
@@ -135,10 +135,10 @@ func (s *AttackService) Attack(ctx context.Context, p AttackParams) (AttackResul
 
 // publishError: дедлайн и отмена клиента проходят как есть (это DEADLINE_EXCEEDED и CANCELED),
 // любой другой сбой очереди — ErrQueueUnavailable, а подробности остаются в логе.
-func publishError(err error) error {
+func publishError(ctx context.Context, err error) error {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return err
 	}
-	slog.Error("publish hit", "err", err)
+	slog.ErrorContext(ctx, "publish hit", "err", err)
 	return domain.ErrQueueUnavailable
 }

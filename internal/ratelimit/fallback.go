@@ -143,7 +143,7 @@ func (f *Fallback) recordFailure(ctx context.Context, err error) {
 	if f.failures >= f.threshold {
 		f.openUntil = f.now().Add(f.cooldown)
 		if f.failures == f.threshold {
-			slog.Warn("rate limiter primary failed, using in-memory fallback",
+			slog.WarnContext(ctx, "rate limiter primary failed, using in-memory fallback",
 				"err", err, "failures", f.failures, "cooldown", f.cooldown)
 		}
 	}

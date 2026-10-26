@@ -19,7 +19,7 @@ const telemetryShutdownTimeout = 5 * time.Second
 
 // Main загружает конфиг, включает JSON-логи и запускает run. Любая ошибка — код выхода 1.
 func Main(name string, run func(ctx context.Context, cfg *config.Config) error) {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	slog.SetDefault(slog.New(telemetry.WithTraceIDs(slog.NewJSONHandler(os.Stdout, nil))))
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -42,7 +42,8 @@ func SignalContext() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 }
 
-// SetupTelemetry настраивает трейсы и метрики. Возвращённую функцию нужно вызвать через defer:
+// SetupTelemetry настраивает трейсы, метрики и логи (slog пишет и в stdout, и по OTLP).
+// Возвращённую функцию нужно вызвать через defer:
 // она сбрасывает остатки в коллектор с собственным контекстом, потому что к моменту остановки
 // родительский ctx уже отменён сигналом.
 func SetupTelemetry(ctx context.Context) (func(), error) {
@@ -50,6 +51,7 @@ func SetupTelemetry(ctx context.Context) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
+	telemetry.InstallLogBridge(serviceName())
 	return func() { //nolint:contextcheck // сброс при остановке: родительский ctx уже отменён
 		flushCtx, cancel := context.WithTimeout(context.Background(), telemetryShutdownTimeout)
 		defer cancel()
@@ -57,4 +59,12 @@ func SetupTelemetry(ctx context.Context) (func(), error) {
 			slog.Warn("telemetry shutdown", "err", err)
 		}
 	}, nil
+}
+
+// serviceName — имя сервиса для области логов в OTLP; то же значение OTel берёт в resource.
+func serviceName() string {
+	if name := os.Getenv("OTEL_SERVICE_NAME"); name != "" {
+		return name
+	}
+	return "raidboss"
 }
