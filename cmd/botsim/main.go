@@ -11,9 +11,6 @@ import (
 	"os"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-
 	"github.com/andrzej80/clan-raid-go/internal/app"
 	"github.com/andrzej80/clan-raid-go/internal/config"
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
@@ -40,6 +37,7 @@ func run(ctx context.Context, args []string) error {
 	fs.Float64Var(&cfg.dupProb, "dup-prob", 0.05, "probability to resend an accepted hit with the same idempotency key")
 	fs.Int64Var(&cfg.hp, "hp", 300_000, "boss hp for newly created raids")
 	fs.DurationVar(&cfg.raidDuration, "raid-duration", 10*time.Minute, "lifetime of newly created raids")
+	conns := fs.Int("conns", 1, "number of gRPC connections (separate TCP), calls are spread round-robin")
 	fs.IntVar(&cfg.watchers, "watchers", 0, "WatchRaid subscribers, spread over the raids round-robin")
 	jsonPath := fs.String("json", "", "write the report as JSON to this file")
 	mode := fs.String("mode", "closed", "closed: each player attacks at --rate; open: scheduler fires --target-rps regardless of responses")
@@ -66,9 +64,9 @@ func run(ctx context.Context, args []string) error {
 	}
 	defer pool.Close()
 
-	conn, err := grpc.NewClient(*addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := newConnPool(*addr, *conns)
 	if err != nil {
-		return fmt.Errorf("grpc client: %w", err)
+		return err
 	}
 	defer func() {
 		if err := conn.Close(); err != nil {
@@ -85,6 +83,7 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 	rep := st.report(time.Since(start))
+	rep.Conns = *conns
 	fmt.Print(rep.format())
 	fmt.Println("raids:")
 	for _, id := range raidIDs {

@@ -1,21 +1,18 @@
 #!/usr/bin/env bash
-# Сценарий этапа 3: нагрузка botsim, docker kill консьюмера посреди нагрузки, перезапуск,
-# проверка инвариантов (raidctl verify) и DLQ для битого сообщения.
+# Сценарий этапа 3 (и хаос этапа 8): нагрузка botsim, docker kill консьюмера посреди нагрузки,
+# перезапуск, проверка инвариантов (raidctl verify) и DLQ для битого сообщения.
 #
 # Требования: docker compose, Go, поднятые pg и kafka из deploy/docker-compose.yml.
 # Скрипт ничего не удаляет: данные добавляются в текущую БД (кланы и игроков создаёт только если их нет).
 #
 #   loadtest/chaos_consumer.sh
 #   HP=3000000 DURATION=60s KILL_AFTER=10 DOWNTIME=5 loadtest/chaos_consumer.sh
+#   MODE=open TARGET_RPS=500 loadtest/chaos_consumer.sh
 set -euo pipefail
-
-# Git Bash на Windows иначе превращает /opt/kafka/... в путь внутри Git.
-export MSYS_NO_PATHCONV=1
-
-cd "$(dirname "$0")/.."
 
 CLANS=${CLANS:-5}
 PLAYERS=${PLAYERS:-50}
+MODE=${MODE:-closed}      # closed — как раньше; open — нагрузка по расписанию (этап 8)
 RATE=${RATE:-2}
 HP=${HP:-1500000}
 DURATION=${DURATION:-40s}
@@ -23,80 +20,26 @@ KILL_AFTER=${KILL_AFTER:-8}   # через сколько секунд посл�
 DOWNTIME=${DOWNTIME:-5}       # сколько секунд консьюмер лежит
 DRAIN_TIMEOUT=${DRAIN_TIMEOUT:-90}
 
-set -a
-# shellcheck disable=SC1091
-source deploy/.env
-set +a
+# shellcheck source=loadtest/lib.sh
+source "$(dirname "$0")/lib.sh"
+ON_EXIT='docker start hits-consumer >/dev/null 2>&1'
 
-DC="docker compose -f deploy/docker-compose.yml --env-file deploy/.env"
-export DATABASE_URL="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:${POSTGRES_PORT}/${POSTGRES_DB}"
-KAFKA_BIN=/opt/kafka/bin
+build_tools
+infra_up
+migrate_seed "$CLANS" "$PLAYERS"
+start_services api hits-consumer
 
-BIN_DIR=$(mktemp -d)
-# go.exe на Windows не понимает /tmp/... из Git Bash.
-if command -v cygpath >/dev/null; then BIN_DIR=$(cygpath -m "$BIN_DIR"); fi
-EXE=""
-case "${OSTYPE:-}" in msys* | cygwin*) EXE=.exe ;; esac
-trap 'rm -rf "$BIN_DIR"' EXIT
-
-step() { printf '\n==> %s\n' "$*"; }
-
-step "build raidctl and botsim"
-go build -o "$BIN_DIR/raidctl$EXE" ./cmd/raidctl
-go build -o "$BIN_DIR/botsim$EXE" ./cmd/botsim
-
-step "infrastructure: postgres, kafka, topics"
-$DC up -d --wait pg kafka redis
-$DC up --no-deps kafka-init
-
-step "migrations and seed"
-"$BIN_DIR/raidctl$EXE" migrate --dir migrations
-players=$($DC exec -T pg psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tA -c 'SELECT count(*) FROM players')
-if [ "$players" -lt $((CLANS * PLAYERS)) ]; then
-  "$BIN_DIR/raidctl$EXE" seed --clans "$CLANS" --players "$PLAYERS"
-fi
-
-step "start api and hits-consumer"
-$DC up -d --build --no-deps api hits-consumer
-for _ in $(seq 1 60); do
-  if (echo >"/dev/tcp/localhost/${APP_PORT}") 2>/dev/null; then break; fi
-  sleep 1
-done
-
-consumer_lag() {
-  docker exec kafka $KAFKA_BIN/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
-    --describe --group hits-consumer 2>/dev/null |
-    awk 'NR > 1 && $6 ~ /^[0-9]+$/ { sum += $6; seen = 1 } END { if (seen) print sum; else print -1 }'
-}
-
-step "load: ${CLANS} clans x ${PLAYERS} players, ${RATE} hits/s each, hp=${HP}, ${DURATION}"
-REPORT="$BIN_DIR/botsim.out"
-"$BIN_DIR/botsim$EXE" --addr "localhost:${APP_PORT}" --clans "$CLANS" --players "$PLAYERS" \
-  --rate "$RATE" --hp "$HP" --duration "$DURATION" >"$REPORT" &
-BOTSIM_PID=$!
-
+start_load chaos-consumer
 sleep "$KILL_AFTER"
-step "docker kill hits-consumer (lag before: $(consumer_lag))"
+step "docker kill hits-consumer (lag before: $(group_lag hits-consumer))"
 docker kill hits-consumer >/dev/null
 sleep "$DOWNTIME"
 step "docker start hits-consumer"
 docker start hits-consumer >/dev/null
-
-wait "$BOTSIM_PID"
-cat "$REPORT"
+finish_load
 
 step "waiting for the consumer to drain the topic"
-deadline=$((SECONDS + DRAIN_TIMEOUT))
-while :; do
-  lag=$(consumer_lag)
-  echo "lag=${lag}"
-  [ "$lag" = "0" ] && break
-  if [ $SECONDS -ge $deadline ]; then
-    echo "lag did not reach 0 in ${DRAIN_TIMEOUT}s" >&2
-    exit 1
-  fi
-  sleep 2
-done
+wait_until "hits-consumer lag" 'group_lag hits-consumer'
 
 step "broken message -> DLQ"
 dlq_end() {
@@ -124,4 +67,4 @@ step "raidctl verify"
 # Redis здесь не проверяется: после kill консьюмера он может отставать от Postgres (см. loadtest/redis_rebuild.sh).
 "$BIN_DIR/raidctl$EXE" verify --redis=false
 
-step "DONE: invariants hold after kill/restart of the consumer"
+step "DONE: invariants hold after kill/restart of the consumer (report: ${REPORT_JSON})"

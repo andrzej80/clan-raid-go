@@ -110,6 +110,7 @@ type latencyReport struct {
 
 // report — итог прогона; его же сериализует флаг --json.
 type report struct {
+	Conns        int            `json:"conns"`
 	ElapsedSec   float64        `json:"elapsed_sec"`
 	RPCTotal     int64          `json:"rpc_total"`
 	RPS          float64        `json:"rps"`
@@ -158,6 +159,7 @@ func (r report) format() string {
 	var out strings.Builder
 	elapsed := time.Duration(r.ElapsedSec * float64(time.Second)).Round(time.Millisecond)
 	fmt.Fprintf(&out, "rpc total:      %d in %s (%.0f rps)\n", r.RPCTotal, elapsed, r.RPS)
+	fmt.Fprintf(&out, "connections:    %d\n", r.Conns)
 	fmt.Fprintf(&out, "OK responses:   %d\n", r.OK)
 	fmt.Fprintf(&out, "retries:        %d\n", r.Retries)
 	if r.Dropped > 0 {

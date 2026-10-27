@@ -175,7 +175,7 @@ type target struct {
 }
 
 // prepare загружает игроков и гарантирует активный рейд для каждого клана.
-func prepare(ctx context.Context, pool *pgxpool.Pool, conn *grpc.ClientConn, cfg simConfig) ([]*target, []string, error) {
+func prepare(ctx context.Context, pool *pgxpool.Pool, conn grpc.ClientConnInterface, cfg simConfig) ([]*target, []string, error) {
 	byClan, err := loadPlayers(ctx, pool, cfg.clans, cfg.players)
 	if err != nil {
 		return nil, nil, err
@@ -201,7 +201,7 @@ func prepare(ctx context.Context, pool *pgxpool.Pool, conn *grpc.ClientConn, cfg
 
 // simulate запускает нагрузку в выбранной модели (и подписчиков, если они заказаны) и возвращает
 // объединённую статистику и список рейдов.
-func simulate(ctx context.Context, pool *pgxpool.Pool, conn *grpc.ClientConn, cfg simConfig) (*stats, []string, error) {
+func simulate(ctx context.Context, pool *pgxpool.Pool, conn grpc.ClientConnInterface, cfg simConfig) (*stats, []string, error) {
 	targets, raidIDs, err := prepare(ctx, pool, conn, cfg)
 	if err != nil {
 		return nil, nil, err
@@ -228,7 +228,7 @@ func simulate(ctx context.Context, pool *pgxpool.Pool, conn *grpc.ClientConn, cf
 }
 
 // runLoad гонит нагрузку в выбранной модели до конца ctx или до завершения всех рейдов.
-func runLoad(ctx context.Context, conn *grpc.ClientConn, targets []*target, cfg simConfig, start time.Time) *stats {
+func runLoad(ctx context.Context, conn grpc.ClientConnInterface, targets []*target, cfg simConfig, start time.Time) *stats {
 	if cfg.open {
 		return runOpen(ctx, conn, targets, cfg, start)
 	}
