@@ -95,3 +95,37 @@ func newConsumerMetrics(mp metric.MeterProvider) (*consumerMetrics, error) {
 	}
 	return &consumerMetrics{dlq: dlq, batchRetries: retries}, nil
 }
+
+// registerLagGauge регистрирует gauge отставания по партициям, назначенным этому консьюмеру.
+// Значение считается при экспорте из уже известных offset'ов (конец партиции из ответов брокера
+// и последний обработанный), отдельных запросов к брокеру нет. Лаг — до обработки пачки, а не до
+// коммита: он показывает, сколько записей ещё не дошло до БД.
+func registerLagGauge(mp metric.MeterProvider, c *Consumer) (metric.Registration, error) {
+	if mp == nil {
+		mp = otel.GetMeterProvider()
+	}
+	meter := mp.Meter(meterName)
+
+	lag, err := meter.Int64ObservableGauge("raidboss.kafka.consumer.lag",
+		metric.WithDescription("Records in the partition not yet processed by this consumer"),
+		metric.WithUnit("{record}"))
+	if err != nil {
+		return nil, fmt.Errorf("create lag gauge: %w", err)
+	}
+	reg, err := meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		for tp, w := range c.partitions {
+			if v, ok := w.lag(); ok {
+				o.ObserveInt64(lag, v, metric.WithAttributes(
+					attribute.String("topic", tp.topic),
+					attribute.Int("partition", int(tp.partition))))
+			}
+		}
+		return nil
+	}, lag)
+	if err != nil {
+		return nil, fmt.Errorf("register lag gauge: %w", err)
+	}
+	return reg, nil
+}

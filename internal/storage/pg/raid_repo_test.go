@@ -18,6 +18,9 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/andrzej80/clan-raid-go/internal/domain"
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
@@ -276,5 +279,58 @@ func TestTxManager_CommitOnSuccess(t *testing.T) {
 	}
 	if _, err := repo.GetRaid(ctx, raid.ID); err != nil {
 		t.Fatalf("raid must be committed: %v", err)
+	}
+}
+
+func TestTxManager_Tracing(t *testing.T) {
+	t.Parallel()
+
+	base := requirePool(t)
+	sr := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
+
+	pool, err := pg.NewPool(context.Background(), &pg.DbConfig{
+		Dsn: base.Config().ConnString(), MaxConns: 2, TracerProvider: tp,
+	})
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	defer pool.Close()
+
+	repo := pg.NewRaidRepo(pool)
+	txm := pg.NewTxManager(pool, pg.WithTracerProvider(tp))
+	boom := errors.New("boom")
+	raid := newRaid(createClan(t, base))
+	err = txm.WithinTx(context.Background(), func(ctx context.Context) error {
+		if err := repo.CreateRaid(ctx, raid); err != nil {
+			return err
+		}
+		return boom
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want boom", err)
+	}
+
+	var txSpan sdktrace.ReadOnlySpan
+	for _, s := range sr.Ended() {
+		if s.Name() == "pg.tx" {
+			txSpan = s
+		}
+	}
+	if txSpan == nil {
+		t.Fatal("pg.tx span not recorded")
+	}
+	if txSpan.Status().Code != codes.Error {
+		t.Errorf("pg.tx status = %v, want Error", txSpan.Status().Code)
+	}
+
+	var queries int
+	for _, s := range sr.Ended() {
+		if s.Parent().SpanID() == txSpan.SpanContext().SpanID() {
+			queries++
+		}
+	}
+	if queries == 0 {
+		t.Error("no query spans under pg.tx")
 	}
 }

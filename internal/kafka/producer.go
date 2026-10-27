@@ -8,12 +8,15 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	eventsV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/events/v1"
 	"github.com/andrzej80/clan-raid-go/internal/domain"
+	"github.com/andrzej80/clan-raid-go/internal/telemetry"
 )
 
 // deliveryTimeout ограничивает отправку, когда у запроса нет своего дедлайна:
@@ -66,8 +69,22 @@ func NewProducer(cfg Config, extra ...kgo.Opt) (*Producer, error) {
 
 // Publish отправляет удар и ждёт подтверждения брокера. Контекст запроса (дедлайн клиента)
 // доходит до продюсера: по его отмене отправка прерывается.
-func (p *Producer) Publish(ctx context.Context, hit domain.Hit) error {
+func (p *Producer) Publish(ctx context.Context, hit domain.Hit) (err error) {
 	start := time.Now()
+
+	// Span продюсера — родитель для консьюмера: его контекст уходит в заголовке записи.
+	ctx, span := tracer().Start(ctx, p.topic+" publish",
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			attrMessagingSystem,
+			attribute.String("messaging.destination.name", p.topic),
+			attribute.String("hit_id", hit.ID.String()),
+			attribute.String("raid_id", hit.RaidID.String()),
+		))
+	defer func() {
+		telemetry.RecordError(span, err)
+		span.End()
+	}()
 
 	value, err := proto.Marshal(hitToEvent(hit))
 	if err != nil {
@@ -76,6 +93,7 @@ func (p *Producer) Publish(ctx context.Context, hit domain.Hit) error {
 	}
 
 	rec := &kgo.Record{Key: []byte(hit.RaidID.String()), Value: value}
+	injectTrace(ctx, rec)
 	if err := p.client.ProduceSync(ctx, rec).FirstErr(); err != nil {
 		p.metrics.observe(ctx, start, failureReason(err))
 		return fmt.Errorf("produce to %s: %w", p.topic, err)

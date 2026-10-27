@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 type hubFixture struct {
@@ -262,4 +264,61 @@ func TestHub_SubscribeCanceledWhileWaitingLeavesNothingBehind(t *testing.T) {
 	if starts, stops := fx.feeder.counts(raidID); starts != 1 || stops != 1 {
 		t.Fatalf("starts=%d stops=%d, want the source stopped after the failed subscribe", starts, stops)
 	}
+}
+
+func TestHub_Metrics(t *testing.T) {
+	t.Parallel()
+	reader := sdkmetric.NewManualReader()
+	fx := newFixture(t, Config{
+		BufferSize: 2, Interval: -1,
+		MeterProvider: sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)),
+	})
+	raidA, raidB := uuid.New(), uuid.New()
+	slow, fast := fx.subscribe(t, raidA), fx.subscribe(t, raidA)
+	fx.subscribe(t, raidB)
+
+	if got := metricValue(t, reader, "raidboss.watch.subscribers"); got != 3 {
+		t.Fatalf("subscribers = %d, want 3", got)
+	}
+	if got := metricValue(t, reader, "raidboss.watch.rooms"); got != 2 {
+		t.Fatalf("rooms = %d, want 2", got)
+	}
+
+	// Медленный не читает: буфер 2 + pending 1, четвёртое обновление отключает его.
+	for i := int64(1); i <= 4; i++ {
+		fx.feeder.emit(t, raidA, hpUpdate(i))
+		nextHP(t, fast)
+	}
+	if got := metricValue(t, reader, "raidboss.watch.slow_disconnects"); got != 1 {
+		t.Fatalf("slow_disconnects = %d, want 1", got)
+	}
+
+	// Отключённый медленный клиент освобождает место после Close, как и любой другой.
+	slow.Close()
+	if got := metricValue(t, reader, "raidboss.watch.subscribers"); got != 2 {
+		t.Fatalf("subscribers after close = %d, want 2", got)
+	}
+}
+
+// metricValue возвращает текущее значение метрики (сумма или gauge) с именем name.
+func metricValue(t *testing.T, reader sdkmetric.Reader, name string) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(t.Context(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			switch data := m.Data.(type) {
+			case metricdata.Gauge[int64]:
+				return data.DataPoints[0].Value
+			case metricdata.Sum[int64]:
+				return data.DataPoints[0].Value
+			}
+		}
+	}
+	return 0
 }

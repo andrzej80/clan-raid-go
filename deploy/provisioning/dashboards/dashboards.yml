@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: raidboss
+    folder: RaidBoss Service
+    type: file
+    # Правки в интерфейсе остаются в БД Grafana, а не в файле: чтобы изменить дашборд в репозитории,
+    # выгрузите его (Share → Export → Export as JSON) и замените raidboss.json.
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards

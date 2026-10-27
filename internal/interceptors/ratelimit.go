@@ -46,7 +46,7 @@ func UnaryRateLimit(limiter Limiter, methods ...string) grpc.UnaryServerIntercep
 
 		allowed, retryAfter, err := limiter.Allow(ctx, playerID)
 		if err != nil {
-			slog.Warn("rate limiter failed, request allowed", "err", err, "player_id", playerID)
+			slog.WarnContext(ctx, "rate limiter failed, request allowed", "err", err, "player_id", playerID)
 			return handler(ctx, req)
 		}
 		if !allowed {

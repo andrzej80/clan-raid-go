@@ -18,6 +18,7 @@ import (
 
 	eventsV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/events/v1"
 	"github.com/andrzej80/clan-raid-go/internal/domain"
+	"github.com/andrzej80/clan-raid-go/internal/telemetry"
 )
 
 const meterName = "github.com/andrzej80/clan-raid-go/internal/rewards"
@@ -201,11 +202,13 @@ func (p *Processor) publish(ctx context.Context, raidID uuid.UUID, inserted []do
 		if err != nil {
 			return fmt.Errorf("marshal reward granted: %w", err)
 		}
+		headers := map[string]string{"type": eventTypeRewardGranted}
+		headers = telemetry.InjectHeaders(ctx, headers)
 		err = p.outbox.Add(ctx, domain.OutboxMessage{
 			Topic:   p.rewardsTopic,
 			Key:     strconv.Itoa(rw.PlayerID),
 			Payload: payload,
-			Headers: map[string]string{"type": eventTypeRewardGranted},
+			Headers: headers,
 		})
 		if err != nil {
 			return err

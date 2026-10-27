@@ -6,6 +6,7 @@ volumes:
   pg_data:
   vm_data:
   tempo_data:
+  loki_data:
   grafana_data:
 
 services:
@@ -117,6 +118,7 @@ services:
     depends_on:
       - tempo
       - victoriametrics
+      - loki
 
   # --- VictoriaMetrics ---
   victoriametrics:
@@ -145,6 +147,20 @@ services:
       - tempo_data:/var/tempo
     ports:
       - "3200:3200"
+    networks:
+      - app
+    restart: always
+
+  # --- Grafana Loki: логи сервисов (приходят из коллектора по OTLP) ---
+  loki:
+    image: grafana/loki:3.5.0
+    container_name: loki
+    command: [ "-config.file=/etc/loki/loki.yml" ]
+    volumes:
+      - ./loki.yml:/etc/loki/loki.yml:ro
+      - loki_data:/loki
+    ports:
+      - "3100:3100"
     networks:
       - app
     restart: always
@@ -182,6 +198,7 @@ services:
       - KAFKA_BROKERS=kafka:9092
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 
       - OTEL_SERVICE_NAME=api
+      - OTEL_METRIC_EXPORT_INTERVAL=10000
     depends_on:
       pg:
         condition: service_healthy
@@ -217,6 +234,7 @@ services:
       - KAFKA_BROKERS=kafka:9092
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_SERVICE_NAME=hits-consumer
+      - OTEL_METRIC_EXPORT_INTERVAL=10000
     depends_on:
       pg:
         condition: service_healthy
@@ -247,6 +265,7 @@ services:
       - KAFKA_BROKERS=kafka:9092
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_SERVICE_NAME=outbox-relay
+      - OTEL_METRIC_EXPORT_INTERVAL=10000
     depends_on:
       pg:
         condition: service_healthy
@@ -273,6 +292,7 @@ services:
       - KAFKA_BROKERS=kafka:9092
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_SERVICE_NAME=rewards-worker
+      - OTEL_METRIC_EXPORT_INTERVAL=10000
     depends_on:
       pg:
         condition: service_healthy
@@ -299,6 +319,7 @@ services:
       - REDIS_URL=redis://redis:6379
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_SERVICE_NAME=scheduler
+      - OTEL_METRIC_EXPORT_INTERVAL=10000
     depends_on:
       pg:
         condition: service_healthy
