@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,6 +39,14 @@ type simConfig struct {
 	dupProb      float64
 	hp           int64
 	raidDuration time.Duration
+
+	// open model: запросы выпускаются по расписанию, независимо от скорости ответов.
+	open        bool
+	targetRPS   float64
+	rampUp      time.Duration
+	maxInflight int
+
+	watchers int // подписчиков WatchRaid, раздаются по рейдам по кругу
 }
 
 // loadPlayers читает из БД первые clans кланов с игроками и до players игроков в каждом.
@@ -139,12 +148,12 @@ func attack(ctx context.Context, client raidbossV1.RaidServiceClient, p player, 
 		code = status.Code(err)
 		st.record(code, time.Since(start))
 		if code == codes.OK {
-			st.accepted++
+			st.markAccepted()
 		}
 		if !retryable(code) || attempt == maxAttempts-1 {
 			return code
 		}
-		st.retries++
+		st.markRetry()
 		select {
 		case <-ctx.Done():
 			return codes.Canceled
@@ -158,8 +167,15 @@ func retryable(c codes.Code) bool {
 	return c == codes.Unavailable || c == codes.DeadlineExceeded || c == codes.ResourceExhausted
 }
 
-// simulate запускает по горутине на игрока и возвращает объединённую статистику и список рейдов.
-func simulate(ctx context.Context, pool *pgxpool.Pool, conn *grpc.ClientConn, cfg simConfig) (*stats, []string, error) {
+// target — игрок и рейд его клана.
+type target struct {
+	p      player
+	raidID string
+	dead   atomic.Bool // рейд побеждён или истёк: удары по нему больше не шлём
+}
+
+// prepare загружает игроков и гарантирует активный рейд для каждого клана.
+func prepare(ctx context.Context, pool *pgxpool.Pool, conn *grpc.ClientConn, cfg simConfig) ([]*target, []string, error) {
 	byClan, err := loadPlayers(ctx, pool, cfg.clans, cfg.players)
 	if err != nil {
 		return nil, nil, err
@@ -167,9 +183,7 @@ func simulate(ctx context.Context, pool *pgxpool.Pool, conn *grpc.ClientConn, cf
 	client := raidbossV1.NewRaidServiceClient(conn)
 
 	var (
-		wg      sync.WaitGroup
-		mu      sync.Mutex
-		total   = newStats()
+		targets []*target
 		raidIDs []string
 	)
 	for _, players := range byClan {
@@ -178,17 +192,133 @@ func simulate(ctx context.Context, pool *pgxpool.Pool, conn *grpc.ClientConn, cf
 			return nil, nil, err
 		}
 		raidIDs = append(raidIDs, raidID)
-
 		for _, p := range players {
-			wg.Go(func() {
-				st := newStats()
-				runBot(ctx, conn, p, raidID, cfg, st)
-				mu.Lock()
-				total.merge(st)
-				mu.Unlock()
-			})
+			targets = append(targets, &target{p: p, raidID: raidID})
 		}
 	}
-	wg.Wait()
+	return targets, raidIDs, nil
+}
+
+// simulate запускает нагрузку в выбранной модели (и подписчиков, если они заказаны) и возвращает
+// объединённую статистику и список рейдов.
+func simulate(ctx context.Context, pool *pgxpool.Pool, conn *grpc.ClientConn, cfg simConfig) (*stats, []string, error) {
+	targets, raidIDs, err := prepare(ctx, pool, conn, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var (
+		ws       *watchStats
+		watchers sync.WaitGroup
+		stop     = func() {}
+	)
+	if cfg.watchers > 0 {
+		var wctx context.Context
+		wctx, stop = context.WithCancel(ctx)
+		ws = newWatchStats()
+		watchers.Go(func() { runWatchers(wctx, conn, targets, cfg.watchers, ws) })
+	}
+
+	total := runLoad(ctx, conn, targets, cfg, time.Now())
+
+	stop() // подписчики, не дождавшиеся finished, выходят по отмене
+	watchers.Wait()
+	total.watch = ws
 	return total, raidIDs, nil
+}
+
+// runLoad гонит нагрузку в выбранной модели до конца ctx или до завершения всех рейдов.
+func runLoad(ctx context.Context, conn *grpc.ClientConn, targets []*target, cfg simConfig, start time.Time) *stats {
+	if cfg.open {
+		return runOpen(ctx, conn, targets, cfg, start)
+	}
+
+	var (
+		wg    sync.WaitGroup
+		total = newStats(start)
+	)
+	for _, t := range targets {
+		wg.Go(func() {
+			st := newStats(start)
+			runBot(ctx, conn, t.p, t.raidID, cfg, st)
+			total.merge(st)
+		})
+	}
+	wg.Wait()
+	return total
+}
+
+// currentRate — целевой RPS в момент elapsed от старта: линейный разгон до target за ramp.
+// В начале разгона возвращает минимум 1, чтобы интервал расписания не уходил в бесконечность.
+func currentRate(elapsed time.Duration, target float64, ramp time.Duration) float64 {
+	rate := target
+	if ramp > 0 && elapsed < ramp {
+		rate = target * float64(elapsed) / float64(ramp)
+	}
+	return max(rate, 1)
+}
+
+// runOpen — open model: планировщик выпускает запрос каждые 1/rate(t), не дожидаясь ответов.
+// Если сервер не успевает, растёт число запросов в полёте (до maxInflight); сверх лимита запрос
+// не отправляется и считается пропущенным — планировщик при этом не блокируется.
+// Если планировщик отстал от расписания, он догоняет без пауз, а не сдвигает расписание.
+func runOpen(ctx context.Context, conn grpc.ClientConnInterface, targets []*target, cfg simConfig, start time.Time) *stats {
+	client := raidbossV1.NewRaidServiceClient(conn)
+	var (
+		wg      sync.WaitGroup
+		total   = newStats(start)
+		sem     = make(chan struct{}, cfg.maxInflight)
+		next    = start
+		nextIdx int
+	)
+
+loop:
+	for ctx.Err() == nil {
+		t, ok := pickTarget(targets, &nextIdx)
+		if !ok {
+			break // все рейды завершены
+		}
+
+		next = next.Add(time.Duration(float64(time.Second) / currentRate(time.Since(start), cfg.targetRPS, cfg.rampUp)))
+		if d := time.Until(next); d > 0 {
+			select {
+			case <-ctx.Done():
+				break loop
+			case <-time.After(d):
+			}
+		}
+
+		select {
+		case sem <- struct{}{}:
+		default:
+			total.markDropped()
+			continue
+		}
+		wg.Go(func() {
+			defer func() { <-sem }()
+			key := uuid.NewString()
+			code := attack(ctx, client, t.p, t.raidID, key, total)
+			if code == codes.FailedPrecondition || code == codes.NotFound {
+				t.dead.Store(true)
+			}
+			if code == codes.OK && rand.Float64() < cfg.dupProb { //nolint:gosec // доля дублей
+				attack(ctx, client, t.p, t.raidID, key, total)
+			}
+		})
+	}
+	wg.Wait()
+	return total
+}
+
+// pickTarget выбирает следующего живого игрока по кругу. Нагрузка делится поровну между всеми
+// игроками: на одного приходится targetRPS/len(targets), и это должно быть меньше лимита 5/с.
+func pickTarget(targets []*target, idx *int) (*target, bool) {
+	for range targets {
+		t := targets[*idx%len(targets)]
+		*idx++
+		if !t.dead.Load() {
+			return t, true
+		}
+	}
+	return nil, false
 }
