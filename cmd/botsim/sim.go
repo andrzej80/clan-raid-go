@@ -47,6 +47,9 @@ type simConfig struct {
 	maxInflight int
 
 	watchers int // подписчиков WatchRaid, раздаются по рейдам по кругу
+
+	retryRatio float64      // доля повторов от новых запросов; < 0 — без ограничения
+	budget     *retryBudget // общий бюджет повторов, создаётся в simulate
 }
 
 // loadPlayers читает из БД первые clans кланов с игроками и до players игроков в каждом.
@@ -122,21 +125,28 @@ func runBot(ctx context.Context, conn grpc.ClientConnInterface, p player, raidID
 		}
 
 		key := uuid.NewString()
-		code := attack(ctx, client, p, raidID, key, st)
+		code := attack(ctx, client, p, raidID, key, st, cfg.budget)
 		if code == codes.FailedPrecondition || code == codes.NotFound {
 			return // рейд побеждён или истёк
 		}
 		if code == codes.OK && rand.Float64() < cfg.dupProb { //nolint:gosec // доля дублей
-			attack(ctx, client, p, raidID, key, st) // повтор с тем же ключом: второго удара быть не должно
+			attack(ctx, client, p, raidID, key, st, cfg.budget) // повтор с тем же ключом: второго удара быть не должно
 		}
 	}
 }
 
 // attack отправляет удар, повторяя при UNAVAILABLE/DEADLINE_EXCEEDED/RESOURCE_EXHAUSTED с тем же
-// idempotency_key. Каждая попытка попадает в статистику отдельно. Возвращает код последней попытки.
-func attack(ctx context.Context, client raidbossV1.RaidServiceClient, p player, raidID, key string, st *stats) codes.Code {
+// idempotency_key. Пауза между повторами растёт, имеет джиттер и не меньше RetryInfo сервера; общее число
+// повторов ограничено бюджетом rb (nil — без ограничения). Каждая попытка попадает в статистику отдельно.
+// Возвращает код последней попытки.
+func attack(
+	ctx context.Context, client raidbossV1.RaidServiceClient, p player, raidID, key string, st *stats, rb *retryBudget,
+) codes.Code {
 	var code codes.Code
 	for attempt := range maxAttempts {
+		if attempt == 0 {
+			rb.deposit()
+		}
 		callCtx, cancel := context.WithTimeout(withPlayer(ctx, p.id), rpcTimeout)
 		start := time.Now()
 		_, err := client.Attack(callCtx, &raidbossV1.AttackRequest{RaidId: raidID, IdempotencyKey: key})
@@ -153,11 +163,15 @@ func attack(ctx context.Context, client raidbossV1.RaidServiceClient, p player, 
 		if !retryable(code) || attempt == maxAttempts-1 {
 			return code
 		}
+		if !rb.withdraw() {
+			st.markRetryDenied()
+			return code
+		}
 		st.markRetry()
 		select {
 		case <-ctx.Done():
 			return codes.Canceled
-		case <-time.After(retryBackoff << attempt):
+		case <-time.After(retryDelay(attempt, err)):
 		}
 	}
 	return code
@@ -202,6 +216,7 @@ func prepare(ctx context.Context, pool *pgxpool.Pool, conn grpc.ClientConnInterf
 // simulate запускает нагрузку в выбранной модели (и подписчиков, если они заказаны) и возвращает
 // объединённую статистику и список рейдов.
 func simulate(ctx context.Context, pool *pgxpool.Pool, conn grpc.ClientConnInterface, cfg simConfig) (*stats, []string, error) {
+	cfg.budget = newRetryBudget(cfg.retryRatio)
 	targets, raidIDs, err := prepare(ctx, pool, conn, cfg)
 	if err != nil {
 		return nil, nil, err
@@ -297,12 +312,12 @@ loop:
 		wg.Go(func() {
 			defer func() { <-sem }()
 			key := uuid.NewString()
-			code := attack(ctx, client, t.p, t.raidID, key, total)
+			code := attack(ctx, client, t.p, t.raidID, key, total, cfg.budget)
 			if code == codes.FailedPrecondition || code == codes.NotFound {
 				t.dead.Store(true)
 			}
 			if code == codes.OK && rand.Float64() < cfg.dupProb { //nolint:gosec // доля дублей
-				attack(ctx, client, t.p, t.raidID, key, total)
+				attack(ctx, client, t.p, t.raidID, key, total, cfg.budget)
 			}
 		})
 	}

@@ -27,7 +27,7 @@ func (f *fakeWatch) WatchRaid(_ *raidbossV1.WatchRaidRequest, stream grpc.Server
 	return f.handler(int(f.calls.Add(1))-1, stream)
 }
 
-func newWatchClient(t *testing.T, srv *fakeWatch) raidbossV1.RaidServiceClient {
+func newWatchClient(t *testing.T, srv raidbossV1.RaidServiceServer) raidbossV1.RaidServiceClient {
 	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 	s := grpc.NewServer()

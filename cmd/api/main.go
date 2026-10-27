@@ -18,7 +18,9 @@ import (
 
 	raidbossV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/v1"
 	"github.com/andrzej80/clan-raid-go/internal/app"
+	"github.com/andrzej80/clan-raid-go/internal/breaker"
 	"github.com/andrzej80/clan-raid-go/internal/config"
+	"github.com/andrzej80/clan-raid-go/internal/domain"
 	"github.com/andrzej80/clan-raid-go/internal/grpcapi"
 	"github.com/andrzej80/clan-raid-go/internal/interceptors"
 	"github.com/andrzej80/clan-raid-go/internal/kafka"
@@ -83,19 +85,22 @@ func run(ctx context.Context, cfg *config.Config) error {
 	defer closeKafka()
 
 	raidRepo := pg.NewRaidRepo(dbPool)
-	attacks := raid.NewAttackService(raidRepo, pg.NewCatalogRepo(dbPool), producer)
+	attacks, err := newAttackService(ctx, raidRepo, pg.NewCatalogRepo(dbPool), producer)
+	if err != nil {
+		return err
+	}
 	leaderboard, err := raid.NewLeaderboardService(raidRepo, rdb.NewBoard(redisClient.Redis()), pg.NewDamageRepo(dbPool))
 	if err != nil {
 		return err
 	}
-	catalog := pg.NewCatalogRepo(dbPool)
-	rewardsService := raid.NewRewardsService(catalog, pg.NewRewardsRepo(dbPool))
 	raids := raid.NewService(raidRepo)
 	service := grpcapi.NewRaidService(
 		grpcapi.WithRaids(grpcapi.NewRaidHandlers(raids)),
 		grpcapi.WithAttacks(grpcapi.NewAttackHandlers(attacks)),
 		grpcapi.WithLeaderboard(grpcapi.NewLeaderboardHandlers(leaderboard)),
-		grpcapi.WithRewards(grpcapi.NewRewardsHandlers(rewardsService)),
+		grpcapi.WithRewards(grpcapi.NewRewardsHandlers(
+			raid.NewRewardsService(pg.NewCatalogRepo(dbPool), pg.NewRewardsRepo(dbPool)),
+		)),
 		grpcapi.WithWatch(grpcapi.NewWatchHandlers(raids, leaderboard, hub)),
 	)
 	// Лимит общий для всех экземпляров api (Redis). При сбое Redis лимит ослабляется до
@@ -298,4 +303,18 @@ func newGRPCServer(
 	}
 
 	return s
+}
+
+// newAttackService собирает приём ударов: продюсер Kafka под предохранителем. Пока очередь недоступна,
+// предохранитель отвечает UNAVAILABLE сразу, а не после таймаута доставки. Фоновая проверка очереди
+// работает до отмены ctx.
+func newAttackService(
+	ctx context.Context, raids domain.RaidRepository, players domain.PlayerReader, producer *kafka.Producer,
+) (*raid.AttackService, error) {
+	hitQueue, err := raid.NewGuardedPublisher(ctx, producer, producer, breaker.Config{})
+	if err != nil {
+		return nil, err
+	}
+	go hitQueue.Run(ctx)
+	return raid.NewAttackService(raids, players, hitQueue), nil
 }

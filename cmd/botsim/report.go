@@ -31,8 +31,10 @@ type stats struct {
 	// оценка числа принятых ударов (уникальные удары считает БД).
 	accepted int
 	retries  int
-	dropped  int         // open model: запросы, не отправленные из-за лимита maxInflight
-	watch    *watchStats // nil, если подписчиков нет
+	// retriesDenied — повторы, которые бот не сделал, потому что бюджет повторов исчерпан.
+	retriesDenied int
+	dropped       int         // open model: запросы, не отправленные из-за лимита maxInflight
+	watch         *watchStats // nil, если подписчиков нет
 }
 
 func newStats(epoch time.Time) *stats {
@@ -70,6 +72,12 @@ func (s *stats) markRetry() {
 	s.mu.Unlock()
 }
 
+func (s *stats) markRetryDenied() {
+	s.mu.Lock()
+	s.retriesDenied++
+	s.mu.Unlock()
+}
+
 func (s *stats) markDropped() {
 	s.mu.Lock()
 	s.dropped++
@@ -95,6 +103,7 @@ func (s *stats) merge(o *stats) {
 	}
 	s.accepted += o.accepted
 	s.retries += o.retries
+	s.retriesDenied += o.retriesDenied
 	s.dropped += o.dropped
 }
 
@@ -110,17 +119,18 @@ type latencyReport struct {
 
 // report — итог прогона; его же сериализует флаг --json.
 type report struct {
-	Conns        int            `json:"conns"`
-	ElapsedSec   float64        `json:"elapsed_sec"`
-	RPCTotal     int64          `json:"rpc_total"`
-	RPS          float64        `json:"rps"`
-	OK           int            `json:"ok_responses"`
-	Retries      int            `json:"retries"`
-	Dropped      int            `json:"dropped"`
-	LatencyMs    latencyReport  `json:"latency_ms"`
-	Codes        map[string]int `json:"codes"`
-	RPSPerSecond []int          `json:"rps_per_second"`
-	Watch        *watchReport   `json:"watch,omitempty"`
+	Conns         int            `json:"conns"`
+	ElapsedSec    float64        `json:"elapsed_sec"`
+	RPCTotal      int64          `json:"rpc_total"`
+	RPS           float64        `json:"rps"`
+	OK            int            `json:"ok_responses"`
+	Retries       int            `json:"retries"`
+	RetriesDenied int            `json:"retries_denied"`
+	Dropped       int            `json:"dropped"`
+	LatencyMs     latencyReport  `json:"latency_ms"`
+	Codes         map[string]int `json:"codes"`
+	RPSPerSecond  []int          `json:"rps_per_second"`
+	Watch         *watchReport   `json:"watch,omitempty"`
 }
 
 func ms(ns float64) float64 { return ns / float64(time.Millisecond) }
@@ -131,11 +141,12 @@ func (s *stats) report(elapsed time.Duration) report {
 
 	q := func(p float64) float64 { return ms(float64(s.hist.ValueAtQuantile(p))) }
 	r := report{
-		ElapsedSec: elapsed.Seconds(),
-		RPCTotal:   s.hist.TotalCount(),
-		OK:         s.accepted,
-		Retries:    s.retries,
-		Dropped:    s.dropped,
+		ElapsedSec:    elapsed.Seconds(),
+		RPCTotal:      s.hist.TotalCount(),
+		OK:            s.accepted,
+		Retries:       s.retries,
+		RetriesDenied: s.retriesDenied,
+		Dropped:       s.dropped,
 		LatencyMs: latencyReport{
 			Mean: ms(s.hist.Mean()), P50: q(50), P95: q(95), P99: q(99), P999: q(99.9), Max: ms(float64(s.hist.Max())),
 		},
@@ -162,6 +173,9 @@ func (r report) format() string {
 	fmt.Fprintf(&out, "connections:    %d\n", r.Conns)
 	fmt.Fprintf(&out, "OK responses:   %d\n", r.OK)
 	fmt.Fprintf(&out, "retries:        %d\n", r.Retries)
+	if r.RetriesDenied > 0 {
+		fmt.Fprintf(&out, "retries denied: %d (retry budget exhausted)\n", r.RetriesDenied)
+	}
 	if r.Dropped > 0 {
 		fmt.Fprintf(&out, "dropped:        %d (max-inflight reached)\n", r.Dropped)
 	}

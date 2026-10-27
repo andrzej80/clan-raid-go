@@ -37,6 +37,7 @@ func run(ctx context.Context, args []string) error {
 	fs.Float64Var(&cfg.dupProb, "dup-prob", 0.05, "probability to resend an accepted hit with the same idempotency key")
 	fs.Int64Var(&cfg.hp, "hp", 300_000, "boss hp for newly created raids")
 	fs.DurationVar(&cfg.raidDuration, "raid-duration", 10*time.Minute, "lifetime of newly created raids")
+	fs.Float64Var(&cfg.retryRatio, "retry-budget", 0.1, "retries allowed as a share of new requests (0.1 = 10%); negative disables the limit")
 	conns := fs.Int("conns", 1, "number of gRPC connections (separate TCP), calls are spread round-robin")
 	fs.IntVar(&cfg.watchers, "watchers", 0, "WatchRaid subscribers, spread over the raids round-robin")
 	jsonPath := fs.String("json", "", "write the report as JSON to this file")
