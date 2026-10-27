@@ -130,7 +130,8 @@ start_load() {
   step "load (${MODE:-open}): ${CLANS} clans x ${PLAYERS} players, hp=${HP}, ${DURATION}, report ${REPORT_JSON}"
   "$BIN_DIR/botsim$EXE" --addr "localhost:${APP_PORT}" --clans "$CLANS" --players "$PLAYERS" \
     --hp "$HP" --duration "$DURATION" --mode "${MODE:-open}" --target-rps "${TARGET_RPS:-300}" \
-    --rate "${RATE:-2}" --conns "${CONNS:-1}" --watchers "${WATCHERS:-0}" --json "$REPORT_JSON" \
+    --rate "${RATE:-2}" --conns "${CONNS:-1}" --watchers "${WATCHERS:-0}" \
+    --ramp-up "${RAMP_UP:-0s}" --json "$REPORT_JSON" \
     >"$BIN_DIR/botsim.out" &
   BOTSIM_PID=$!
 }
@@ -153,4 +154,40 @@ drain_pipeline() {
 # report_count <код gRPC, например Unavailable>: сколько ответов с таким кодом в JSON-отчёте botsim.
 report_count() {
   grep -E "\"$1\":" "$REPORT_JSON" | head -n 1 | tr -dc '0-9' || true
+}
+
+# start_lag_sampler / stop_lag_sampler: раз в секунду замеряют лаг hits-consumer, максимум — в $BIN_DIR/lag.max.
+start_lag_sampler() {
+  echo 0 >"$BIN_DIR/lag.max"
+  (
+    while :; do
+      lag=$(group_lag hits-consumer)
+      if [ "$lag" -gt "$(cat "$BIN_DIR/lag.max")" ]; then echo "$lag" >"$BIN_DIR/lag.max"; fi
+      sleep 1
+    done
+  ) &
+  LAG_PID=$!
+}
+
+stop_lag_sampler() {
+  kill "$LAG_PID" 2>/dev/null || true
+  wait "$LAG_PID" 2>/dev/null || true
+}
+
+# json_num <ключ>: число из JSON-отчёта botsim (первое вхождение ключа).
+json_num() {
+  grep -m1 "\"$1\":" "$REPORT_JSON" | sed 's/.*: *\([0-9.eE+-]*\),\{0,1\}$/\1/'
+}
+
+# result_row <метка>: строка таблицы результатов (markdown) по последнему отчёту botsim и лагу.
+# Столбцы: сценарий | RPS | p50 | p95 | p99 | OK | Unavailable | прочие ошибки | макс. лаг консьюмера.
+result_row() {
+  local ok unavail total others
+  ok=$(json_num ok_responses)
+  unavail=$(report_count Unavailable)
+  total=$(json_num rpc_total)
+  others=$((total - ok - ${unavail:-0}))
+  printf '| %s | %.0f | %.1f | %.1f | %.1f | %s | %s | %s | %s |\n' "$1" "$(json_num rps)" \
+    "$(json_num p50)" "$(json_num p95)" "$(json_num p99)" "$ok" "${unavail:-0}" "$others" \
+    "$(cat "$BIN_DIR/lag.max" 2>/dev/null || echo -)" | tee -a loadtest/results/table.md
 }
