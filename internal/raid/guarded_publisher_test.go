@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -30,7 +31,7 @@ func (h stubHealth) Ping(context.Context) error { return h.err }
 func newGuarded(t *testing.T, next HitPublisher) *GuardedPublisher {
 	t.Helper()
 	g, err := NewGuardedPublisher(context.Background(), next, stubHealth{}, breaker.Config{
-		FailureThreshold: 2, CloseAfter: 2, Rand: func() float64 { return 0 },
+		FailureThreshold: 2, CloseAfter: 2, SettleTime: time.Second, Rand: func() float64 { return 0 }, Now: steppingClock(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -106,5 +107,14 @@ func TestPublishErrorKeepsBreakerRejection(t *testing.T) {
 
 	if err := publishError(context.Background(), domain.ErrQueueUnavailable); !errors.Is(err, domain.ErrQueueUnavailable) {
 		t.Fatalf("err = %v, want ErrQueueUnavailable", err)
+	}
+}
+
+// steppingClock сдвигается на секунду при каждом обращении: время в half-open проходит само, тест не спит.
+func steppingClock() func() time.Time {
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	return func() time.Time {
+		now = now.Add(time.Second)
+		return now
 	}
 }

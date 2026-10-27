@@ -4,7 +4,9 @@
 // Выход из разомкнутого состояния определяет не время и не трафик, а внешняя проверка (Run): пока она
 // не подтвердила, что зависимость жива, вызовы не пропускаются. После этого предохранитель пропускает
 // малую долю трафика (ProbeRatio, но не реже одного вызова в MinProbeInterval, чтобы при малой нагрузке
-// проб хватало) и замыкается, когда CloseAfter таких вызовов подряд прошли успешно.
+// проб хватало) и замыкается, когда набралось CloseAfter успешных проб И прошло SettleTime без единого
+// сбоя. Время нужно, чтобы свежеподнятая зависимость успела показать себя на разных запросах (разные
+// партиции Kafka поднимаются не одновременно); при малой нагрузке хватает одного успеха (LowTrafficAfter).
 package breaker
 
 import (
@@ -57,9 +59,12 @@ type Config struct {
 	MaxInconclusive int
 	// OnStateChange вызывается при каждой смене состояния, без удержания блокировки.
 	OnStateChange func(from, to State)
-	// SettleTime — через сколько времени после входа в half-open хватает одного успешного вызова, чтобы
-	// замкнуться, если CloseAfter набрать не успели (по умолчанию 1 с). Нужно при малой нагрузке.
+	// SettleTime — минимальное время в half-open без единого сбоя, прежде чем замкнуться (по умолчанию 1 с).
+	// Сбой сбрасывает и время, и счётчик успехов.
 	SettleTime time.Duration
+	// LowTrafficAfter — при малой нагрузке CloseAfter может не набраться: через это время в half-open
+	// достаточно одного успешного вызова (по умолчанию 3 с).
+	LowTrafficAfter time.Duration
 	// Now подменяет часы в тестах.
 	Now func() time.Time
 	// Rand подменяет источник случайных чисел [0, 1) в тестах.
@@ -92,6 +97,9 @@ func New(cfg Config) *Breaker {
 	}
 	if cfg.MaxInconclusive <= 0 {
 		cfg.MaxInconclusive = 10
+	}
+	if cfg.LowTrafficAfter <= 0 {
+		cfg.LowTrafficAfter = 3 * time.Second
 	}
 	if cfg.SettleTime <= 0 {
 		cfg.SettleTime = time.Second
@@ -170,9 +178,9 @@ func (b *Breaker) allowLocked() (epoch uint64, probe, closed bool, _ error) {
 		// разомкнут: из этого состояния выводит только проверка живости (HalfOpen)
 	case HalfOpen:
 		now := b.cfg.Now()
-		// При малой нагрузке успешных проб набирается мало: один успех и SettleTime без сбоев
-		// считаются достаточными. Условие проверяется лениво, на следующем вызове.
-		if b.successes > 0 && now.Sub(b.halfOpenAt) >= b.cfg.SettleTime {
+		// Условие замыкания проверяется и лениво, на следующем вызове: при малой нагрузке успехов может
+		// не хватить для countProbe, а время уже вышло.
+		if b.settled(now) {
 			b.transition(Closed)
 			return b.epoch, false, true, nil
 		}
@@ -220,7 +228,7 @@ func (b *Breaker) countProbe(res result) {
 		b.transition(Open)
 	case resOK:
 		b.successes++
-		if b.successes >= b.cfg.CloseAfter {
+		if b.settled(b.cfg.Now()) {
 			b.transition(Closed)
 		}
 	case resInconclusive:
@@ -285,4 +293,14 @@ func (b *Breaker) Run(ctx context.Context, interval, timeout time.Duration, prob
 			b.HalfOpen()
 		}
 	}
+}
+
+// settled: можно ли замкнуться. Нужен SettleTime в half-open (сбой его бы сбросил, перейдя в Open) и либо
+// CloseAfter успехов, либо — при малой нагрузке — один успех после LowTrafficAfter. Вызывается под b.mu.
+func (b *Breaker) settled(now time.Time) bool {
+	elapsed := now.Sub(b.halfOpenAt)
+	if elapsed < b.cfg.SettleTime {
+		return false
+	}
+	return b.successes >= b.cfg.CloseAfter || (b.successes >= 1 && elapsed >= b.cfg.LowTrafficAfter)
 }

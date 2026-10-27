@@ -108,25 +108,6 @@ func TestHalfOpenAdmitsOnlyProbeRatio(t *testing.T) {
 	}
 }
 
-func TestHalfOpenClosesAfterEnoughSuccesses(t *testing.T) {
-	t.Parallel()
-
-	b := newTest(1)
-	open(t, b)
-	b.HalfOpen()
-
-	for range 2 {
-		_ = b.Do(ok, nil)
-		if b.State() != HalfOpen {
-			t.Fatalf("state = %v: a single success must not close the breaker", b.State())
-		}
-	}
-	_ = b.Do(ok, nil)
-	if b.State() != Closed {
-		t.Fatalf("state = %v, want closed after CloseAfter successes", b.State())
-	}
-}
-
 func TestHalfOpenReopensOnFailure(t *testing.T) {
 	t.Parallel()
 
@@ -171,37 +152,6 @@ func TestClientErrorsAreNotFailures(t *testing.T) {
 	}
 	if b.State() != Closed {
 		t.Fatalf("state = %v: client cancellations must not open the breaker", b.State())
-	}
-}
-
-func TestStaleResultsAreIgnored(t *testing.T) {
-	t.Parallel()
-
-	b := newTest(1)
-	open(t, b)
-	b.HalfOpen()
-
-	// Долгий пробный вызов начался в этом half-open, а закончится после того, как состояние сменилось.
-	release := make(chan struct{})
-	started := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = b.Do(func() error { close(started); <-release; return errBoom }, nil)
-	}()
-	<-started
-
-	// Остальные пробы замыкают предохранитель.
-	for range 3 {
-		_ = b.Do(ok, nil)
-	}
-	if b.State() != Closed {
-		t.Fatalf("state = %v, want closed", b.State())
-	}
-	close(release)
-	<-done
-	if b.State() != Closed {
-		t.Fatalf("state = %v: a failure from a previous epoch must not reopen the breaker", b.State())
 	}
 }
 
@@ -264,37 +214,6 @@ func TestRunDoesNotProbeWhenClosed(t *testing.T) {
 	}
 }
 
-func TestStateChangeCallback(t *testing.T) {
-	t.Parallel()
-
-	var mu sync.Mutex
-	var transitions []string
-	b := New(Config{
-		FailureThreshold: 1, CloseAfter: 1, Rand: func() float64 { return 0 },
-		OnStateChange: func(from, to State) {
-			mu.Lock()
-			transitions = append(transitions, from.String()+">"+to.String())
-			mu.Unlock()
-		},
-	})
-
-	_ = b.Do(fail, nil)
-	b.HalfOpen()
-	_ = b.Do(ok, nil)
-
-	want := []string{"closed>open", "open>half-open", "half-open>closed"}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(transitions) != len(want) {
-		t.Fatalf("transitions = %v, want %v", transitions, want)
-	}
-	for i := range want {
-		if transitions[i] != want[i] {
-			t.Fatalf("transitions = %v, want %v", transitions, want)
-		}
-	}
-}
-
 func TestConcurrentUse(t *testing.T) {
 	t.Parallel()
 
@@ -341,36 +260,6 @@ func TestHalfOpenGuaranteesMinimumProbeRate(t *testing.T) {
 	}
 }
 
-// При малой нагрузке CloseAfter не набрать: одного успеха и SettleTime без сбоев достаточно.
-func TestHalfOpenClosesAfterSettleTimeWithOneSuccess(t *testing.T) {
-	t.Parallel()
-
-	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
-	b := New(Config{
-		FailureThreshold: 1, CloseAfter: 100, SettleTime: time.Second,
-		Rand: func() float64 { return 0 }, Now: func() time.Time { return now },
-	})
-	open(t, b)
-	b.HalfOpen()
-
-	if err := b.Do(ok, nil); err != nil {
-		t.Fatalf("probe err = %v", err)
-	}
-	now = now.Add(500 * time.Millisecond)
-	_ = b.Do(ok, nil)
-	if b.State() != HalfOpen {
-		t.Fatalf("state = %v: SettleTime has not passed yet", b.State())
-	}
-
-	now = now.Add(500 * time.Millisecond)
-	if err := b.Do(ok, nil); err != nil {
-		t.Fatalf("err = %v", err)
-	}
-	if b.State() != Closed {
-		t.Fatalf("state = %v, want closed after one success and SettleTime without failures", b.State())
-	}
-}
-
 func TestHalfOpenDoesNotSettleWithoutSuccess(t *testing.T) {
 	t.Parallel()
 
@@ -386,5 +275,187 @@ func TestHalfOpenDoesNotSettleWithoutSuccess(t *testing.T) {
 	_ = b.Do(func() error { return context.Canceled }, isNotClientErr)
 	if b.State() != HalfOpen {
 		t.Fatalf("state = %v: silence is not evidence that the dependency is healthy", b.State())
+	}
+}
+
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *fakeClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+// newTimed: часы управляются тестом, в half-open пропускается каждый вызов, CloseAfter = 3,
+// SettleTime = 1 с, LowTrafficAfter = 3 с. Возвращает предохранитель уже в half-open.
+func newTimed(t *testing.T) (*Breaker, *fakeClock) {
+	t.Helper()
+
+	clock := &fakeClock{t: time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)}
+	b := New(Config{
+		FailureThreshold: 1, CloseAfter: 3, MaxInconclusive: 2,
+		SettleTime: time.Second, LowTrafficAfter: 3 * time.Second,
+		Rand: func() float64 { return 0 }, Now: clock.now,
+	})
+	open(t, b)
+	b.HalfOpen()
+	return b, clock
+}
+
+func TestHalfOpenNeedsBothSuccessesAndSettleTime(t *testing.T) {
+	t.Parallel()
+
+	b, clock := newTimed(t)
+
+	for range 5 {
+		_ = b.Do(ok, nil)
+	}
+	if b.State() != HalfOpen {
+		t.Fatalf("state = %v: enough successes are not enough before SettleTime has passed", b.State())
+	}
+
+	clock.advance(time.Second)
+	_ = b.Do(ok, nil)
+	if b.State() != Closed {
+		t.Fatalf("state = %v, want closed after CloseAfter successes and SettleTime", b.State())
+	}
+}
+
+func TestHalfOpenTimePassedButTooFewSuccesses(t *testing.T) {
+	t.Parallel()
+
+	b, clock := newTimed(t)
+
+	_ = b.Do(ok, nil)
+	_ = b.Do(ok, nil)
+	clock.advance(2 * time.Second) // дольше SettleTime, но короче LowTrafficAfter
+	_ = b.Do(ok, nil)
+	if b.State() != Closed {
+		t.Fatalf("state = %v: the third success after SettleTime must close the breaker", b.State())
+	}
+}
+
+// При малой нагрузке CloseAfter не набрать: после LowTrafficAfter хватает одного успеха.
+func TestHalfOpenLowTrafficClosesOnOneSuccess(t *testing.T) {
+	t.Parallel()
+
+	b, clock := newTimed(t)
+
+	if err := b.Do(ok, nil); err != nil {
+		t.Fatalf("probe err = %v", err)
+	}
+	clock.advance(2 * time.Second)
+	b.Do(func() error { return context.Canceled }, isNotClientErr) //nolint:errcheck // ответ клиента не важен, нужен лишь вызов allow
+	if b.State() != HalfOpen {
+		t.Fatalf("state = %v: one success is not enough before LowTrafficAfter", b.State())
+	}
+
+	clock.advance(time.Second)
+	if err := b.Do(ok, nil); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if b.State() != Closed {
+		t.Fatalf("state = %v, want closed after one success and LowTrafficAfter", b.State())
+	}
+}
+
+// Сбой в half-open сбрасывает и счётчик успехов, и время: отсчёт SettleTime начинается заново.
+func TestHalfOpenFailureRestartsSettleTime(t *testing.T) {
+	t.Parallel()
+
+	b, clock := newTimed(t)
+
+	_ = b.Do(ok, nil)
+	clock.advance(900 * time.Millisecond)
+	_ = b.Do(fail, nil)
+	if b.State() != Open {
+		t.Fatalf("state = %v, want open after a failed probe", b.State())
+	}
+
+	b.HalfOpen()
+	clock.advance(500 * time.Millisecond)
+	for range 3 {
+		_ = b.Do(ok, nil)
+	}
+	if b.State() != HalfOpen {
+		t.Fatalf("state = %v: SettleTime must restart from the new half-open", b.State())
+	}
+	clock.advance(500 * time.Millisecond)
+	_ = b.Do(ok, nil)
+	if b.State() != Closed {
+		t.Fatalf("state = %v, want closed", b.State())
+	}
+}
+
+func TestStaleResultsAreIgnored(t *testing.T) {
+	t.Parallel()
+
+	b, clock := newTimed(t)
+
+	// Долгий пробный вызов начался в этом half-open, а закончится после того, как состояние сменилось.
+	release := make(chan struct{})
+	started := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = b.Do(func() error { close(started); <-release; return errBoom }, nil)
+	}()
+	<-started
+
+	// Остальные пробы замыкают предохранитель.
+	clock.advance(time.Second)
+	for range 3 {
+		_ = b.Do(ok, nil)
+	}
+	if b.State() != Closed {
+		t.Fatalf("state = %v, want closed", b.State())
+	}
+	close(release)
+	<-done
+	if b.State() != Closed {
+		t.Fatalf("state = %v: a failure from a previous epoch must not reopen the breaker", b.State())
+	}
+}
+
+func TestStateChangeCallback(t *testing.T) {
+	t.Parallel()
+
+	clock := &fakeClock{t: time.Now()}
+	var mu sync.Mutex
+	var transitions []string
+	b := New(Config{
+		FailureThreshold: 1, CloseAfter: 1, SettleTime: time.Second, Now: clock.now,
+		Rand: func() float64 { return 0 },
+		OnStateChange: func(from, to State) {
+			mu.Lock()
+			transitions = append(transitions, from.String()+">"+to.String())
+			mu.Unlock()
+		},
+	})
+
+	_ = b.Do(fail, nil)
+	b.HalfOpen()
+	clock.advance(time.Second)
+	_ = b.Do(ok, nil)
+
+	want := []string{"closed>open", "open>half-open", "half-open>closed"}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(transitions) != len(want) {
+		t.Fatalf("transitions = %v, want %v", transitions, want)
+	}
+	for i := range want {
+		if transitions[i] != want[i] {
+			t.Fatalf("transitions = %v, want %v", transitions, want)
+		}
 	}
 }
