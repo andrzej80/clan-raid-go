@@ -19,9 +19,12 @@ import (
 	"github.com/andrzej80/clan-raid-go/internal/telemetry"
 )
 
-// deliveryTimeout ограничивает отправку, когда у запроса нет своего дедлайна:
+// deliveryTimeout — сколько продюсер пытается доставить запись. Он намного короче типичного дедлайна
+// клиента (секунды), чтобы при недоступном брокере Attack отвечал UNAVAILABLE, а не упирался в дедлайн
+// клиента (DEADLINE_EXCEEDED). Подтверждение от здорового брокера занимает миллисекунды.
+// Он же ограничивает отправку, когда у запроса нет своего дедлайна:
 // без него при недоступном брокере Publish ждал бы бесконечно, а клиент должен получить UNAVAILABLE.
-const deliveryTimeout = 5 * time.Second
+const deliveryTimeout = time.Second
 
 type Config struct {
 	Brokers []string
@@ -36,6 +39,8 @@ type Producer struct {
 	client  *kgo.Client
 	topic   string
 	metrics *producerMetrics
+	// produce отправляет запись и ждёт подтверждения; подменяется в тестах.
+	produce func(ctx context.Context, rec *kgo.Record) error
 }
 
 func NewProducer(cfg Config, extra ...kgo.Opt) (*Producer, error) {
@@ -64,7 +69,9 @@ func NewProducer(cfg Config, extra ...kgo.Opt) (*Producer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("kafka: new client: %w", err)
 	}
-	return &Producer{client: client, topic: cfg.Topic, metrics: metrics}, nil
+	p := &Producer{client: client, topic: cfg.Topic, metrics: metrics}
+	p.produce = func(ctx context.Context, rec *kgo.Record) error { return client.ProduceSync(ctx, rec).FirstErr() }
+	return p, nil
 }
 
 // Publish отправляет удар и ждёт подтверждения брокера. Контекст запроса (дедлайн клиента)
@@ -94,7 +101,7 @@ func (p *Producer) Publish(ctx context.Context, hit domain.Hit) (err error) {
 
 	rec := &kgo.Record{Key: []byte(hit.RaidID.String()), Value: value}
 	injectTrace(ctx, rec)
-	if err := p.client.ProduceSync(ctx, rec).FirstErr(); err != nil {
+	if err := p.produceBounded(ctx, rec); err != nil {
 		p.metrics.observe(ctx, start, failureReason(err))
 		return fmt.Errorf("produce to %s: %w", p.topic, err)
 	}
@@ -121,5 +128,36 @@ func hitToEvent(hit domain.Hit) *eventsV1.HitEvent {
 		Damage:    int32(hit.Damage), //nolint:gosec // урон ограничен силой игрока (≤ 1000 × 1.2 × 2)
 		IsCrit:    hit.IsCrit,
 		CreatedAt: timestamppb.New(hit.CreatedAt),
+	}
+}
+
+// errPublishTimeout — запись не подтверждена за deliveryTimeout. Это сбой очереди, а не дедлайн клиента:
+// он не оборачивает context.DeadlineExceeded, чтобы Attack ответил UNAVAILABLE и предохранитель его учёл.
+var errPublishTimeout = errors.New("kafka: record not acknowledged in time")
+
+// produceBounded ограничивает отправку deliveryTimeout независимо от внутренностей клиента. RecordDeliveryTimeout
+// franz-go этого не гарантирует: пока клиент застрял на подключении или обновлении метаданных, запись
+// «висит» дольше таймаута (на стенде при остановленном брокере — десятки секунд), и Attack отвечал
+// DEADLINE_EXCEEDED, который предохранитель не считает сбоем очереди. Если клиент застрял, горутина с
+// отправкой доживает свою попытку в фоне, а запись, дошедшая позже, безвредна: консьюмер отсекает дубль
+// повтора с тем же ключом по hit_id.
+func (p *Producer) produceBounded(ctx context.Context, rec *kgo.Record) error {
+	pctx, cancel := context.WithTimeout(ctx, deliveryTimeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- p.produce(pctx, rec) }()
+
+	select {
+	case err := <-done:
+		if err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			return errPublishTimeout // сработал наш таймаут, а не дедлайн клиента
+		}
+		return err
+	case <-pctx.Done():
+		if err := ctx.Err(); err != nil {
+			return err // дедлайн или отмена клиента
+		}
+		return errPublishTimeout
 	}
 }

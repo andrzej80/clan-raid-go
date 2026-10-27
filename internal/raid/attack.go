@@ -139,6 +139,9 @@ func publishError(ctx context.Context, err error) error {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return err
 	}
+	if errors.Is(err, domain.ErrQueueUnavailable) {
+		return err // отказ предохранителя: причина уже в логе, не засоряем его на каждый запрос
+	}
 	slog.ErrorContext(ctx, "publish hit", "err", err)
 	return domain.ErrQueueUnavailable
 }

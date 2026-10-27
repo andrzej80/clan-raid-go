@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"errors"
+	"net"
 	"testing"
 	"time"
 
@@ -219,5 +220,110 @@ func TestNewProducer_Validation(t *testing.T) {
 	}
 	if _, err := NewProducer(Config{Brokers: []string{"a:1"}}); err == nil {
 		t.Fatal("no topic must be an error")
+	}
+}
+
+// Брокер недоступен, у клиента дедлайн 2 с: продюсер сдаётся раньше (по таймауту доставки) и возвращает
+// сбой брокера, а не дедлайн клиента — иначе Attack отвечал бы DEADLINE_EXCEEDED вместо UNAVAILABLE.
+func TestProducer_BrokerDownBeatsClientDeadline(t *testing.T) {
+	t.Parallel()
+
+	producer := newProducer(t, []string{"127.0.0.1:1"})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err := producer.Publish(ctx, newHit(uuid.New()))
+	if err == nil {
+		t.Fatal("Publish must fail when the broker is unreachable")
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v: a broker failure must not look like a client deadline", err)
+	}
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+		t.Fatalf("Publish took %v, want about deliveryTimeout (%v)", elapsed, deliveryTimeout)
+	}
+}
+
+// Подключение к брокеру зависает (например, DNS остановленного контейнера отвечает десятки секунд):
+// delivery timeout franz-go в это время не срабатывает, но Publish обязан вернуться сам за deliveryTimeout
+// с ошибкой очереди, а не с дедлайном клиента — иначе предохранитель десятки секунд не видит сбоя.
+func TestProducer_HangingDialBeatsClientDeadline(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	hang := kgo.Dialer(func(ctx context.Context, _, _ string) (net.Conn, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil, errors.New("dial: no such host")
+	})
+
+	producer := newProducer(t, []string{"kafka:9092"}, hang)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err := producer.Publish(ctx, newHit(uuid.New()))
+	if err == nil {
+		t.Fatal("Publish must fail when the broker cannot be reached")
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v: a connection hang must not look like a client deadline", err)
+	}
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+		t.Fatalf("Publish took %v, want about deliveryTimeout (%v)", elapsed, deliveryTimeout)
+	}
+}
+
+// Клиент kafka застрял и не реагирует на контекст (так вёл себя franz-go при остановленном брокере):
+// Publish обязан вернуться сам за deliveryTimeout с ошибкой очереди.
+func TestProducer_StuckClientIsBoundedByDeliveryTimeout(t *testing.T) {
+	t.Parallel()
+
+	producer := newProducer(t, startCluster(t))
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	producer.produce = func(context.Context, *kgo.Record) error {
+		<-release // игнорирует контекст
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err := producer.Publish(ctx, newHit(uuid.New()))
+	if !errors.Is(err, errPublishTimeout) {
+		t.Fatalf("err = %v, want errPublishTimeout", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v: a queue failure must not look like a client deadline", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*deliveryTimeout {
+		t.Fatalf("Publish took %v, want about %v", elapsed, deliveryTimeout)
+	}
+}
+
+// Клиентский дедлайн короче deliveryTimeout остаётся дедлайном клиента.
+func TestProducer_ShortClientDeadlineStaysClientError(t *testing.T) {
+	t.Parallel()
+
+	producer := newProducer(t, startCluster(t))
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	producer.produce = func(context.Context, *kgo.Record) error {
+		<-release
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	err := producer.Publish(ctx, newHit(uuid.New()))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want the client deadline", err)
 	}
 }

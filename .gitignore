@@ -33,3 +33,5 @@ go.work.sum
 .cursor/
 .claude/
 bin/
+# Сырые отчёты нагрузочных прогонов (botsim --json); итоговая таблица живёт в README
+loadtest/results/
