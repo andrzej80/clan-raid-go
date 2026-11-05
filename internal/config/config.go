@@ -94,7 +94,19 @@ type SchedulerConfig struct {
 	Interval time.Duration
 }
 
+// Режимы приёма ударов (ATTACK_MODE).
+const (
+	// AttackModeKafka — удар кладётся в Kafka, применяет его hits-consumer (по умолчанию).
+	AttackModeKafka = "kafka"
+	// AttackModeSync — эксперимент «горячая строка»: UPDATE raids и INSERT raid_hits прямо в запросе.
+	AttackModeSync = "sync"
+	// AttackModeSyncFull — то же, но полной обработкой как у консьюмера (raid_damage, outbox, Redis).
+	AttackModeSyncFull = "sync-full"
+)
+
 type Config struct {
+	// AttackMode — как api обрабатывает удары: AttackModeKafka, AttackModeSync или AttackModeSyncFull.
+	AttackMode     string
 	GRPCAddr       string
 	GRPCReflection bool
 	DB             pg.DbConfig
@@ -145,6 +157,17 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid GRPC_REFLECTION %q: %w", isDevMode, err)
 		}
 		cfg.GRPCReflection = parsed
+	}
+
+	cfg.AttackMode = AttackModeKafka
+	if mode := os.Getenv("ATTACK_MODE"); mode != "" {
+		switch mode {
+		case AttackModeKafka, AttackModeSync, AttackModeSyncFull:
+			cfg.AttackMode = mode
+		default:
+			return nil, fmt.Errorf("invalid ATTACK_MODE %q: want %s, %s or %s",
+				mode, AttackModeKafka, AttackModeSync, AttackModeSyncFull)
+		}
 	}
 
 	db, err := loadDB()

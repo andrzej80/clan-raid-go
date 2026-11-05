@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
@@ -75,20 +76,16 @@ func run(ctx context.Context, cfg *config.Config) error {
 	hub, closeHub := newWatchHub(redisClient.Redis(), cfg.Watch)
 	defer closeHub()
 
-	producer, err := kafka.NewProducer(kafka.Config{Brokers: cfg.Kafka.Brokers, Topic: cfg.Kafka.HitsTopic})
+	raidRepo := pg.NewRaidRepo(dbPool)
+	attacks, deps, closeProducerFn, err := newAttackMode(ctx, cfg, dbPool, redisClient.Redis(), raidRepo)
 	if err != nil {
 		return err
 	}
 	// Продюсер закрывается после GracefulStop (см. shutdown): идущие Attack ждут подтверждения брокера.
 	// Defer — страховка для раннего выхода по ошибке; OnceFunc не даст закрыть дважды.
-	closeKafka := sync.OnceFunc(func() { closeProducer(producer) }) //nolint:contextcheck // закрытие после отмены ctx сигналом
+	closeKafka := sync.OnceFunc(closeProducerFn) //nolint:contextcheck // закрытие после отмены ctx сигналом
 	defer closeKafka()
 
-	raidRepo := pg.NewRaidRepo(dbPool)
-	attacks, err := newAttackService(ctx, raidRepo, pg.NewCatalogRepo(dbPool), producer)
-	if err != nil {
-		return err
-	}
 	leaderboard, err := raid.NewLeaderboardService(raidRepo, rdb.NewBoard(redisClient.Redis()), pg.NewDamageRepo(dbPool))
 	if err != nil {
 		return err
@@ -122,10 +119,7 @@ func run(ctx context.Context, cfg *config.Config) error {
 	// Redis здесь намеренно нет: это не критичная зависимость. Лимит при его сбое держит Memory,
 	// а Attack от Redis не зависит. Если появится чтение, которому некуда деться без Redis
 	// (например, GetLeaderboard без фоллбэка на Postgres), решение стоит пересмотреть.
-	go watchHealth(ctx, dependencies{
-		{name: "postgres", pinger: dbPool, timeout: dbPingTimeout},
-		{name: "kafka", pinger: producer, timeout: kafkaPingTimeout},
-	}, hs)
+	go watchHealth(ctx, append(dependencies{{name: "postgres", pinger: dbPool, timeout: dbPingTimeout}}, deps...), hs)
 
 	errCh := make(chan error, 1)
 
@@ -303,6 +297,48 @@ func newGRPCServer(
 	}
 
 	return s
+}
+
+// newAttackMode собирает приём ударов по ATTACK_MODE. Возвращает дополнительные зависимости для
+// health (Kafka нужна только в режиме kafka) и функцию закрытия продюсера (в sync-режимах пустая).
+func newAttackMode(
+	ctx context.Context, cfg *config.Config, dbPool *pgxpool.Pool, rc redis.UniversalClient, raids domain.RaidRepository,
+) (attacks *raid.AttackService, deps dependencies, closeFn func(), err error) {
+	catalog := pg.NewCatalogRepo(dbPool)
+	switch cfg.AttackMode {
+	case config.AttackModeSync:
+		pub, err := raid.NewSyncPublisher(pg.NewSyncHitsRepo(dbPool), cfg.AttackMode)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		slog.Info("attack mode: sync (UPDATE raids directly in Postgres, no Kafka)")
+		return raid.NewAttackService(raids, catalog, pub), nil, func() {}, nil
+	case config.AttackModeSyncFull:
+		board := rdb.NewBoard(rc)
+		processor, err := raid.NewHitsProcessor(pg.NewTxManager(dbPool), pg.NewHitsRepo(dbPool),
+			pg.NewOutboxRepo(dbPool), cfg.Kafka.EventsTopic, raid.WithBoard(board), raid.WithFinishPublisher(board))
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		pub, err := raid.NewSyncPublisher(raid.ProcessorApplier{Processor: processor}, cfg.AttackMode)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		slog.Info("attack mode: sync-full (hits-consumer logic per hit, in the request, no Kafka)")
+		return raid.NewAttackService(raids, catalog, pub), nil, func() {}, nil
+	}
+
+	producer, err := kafka.NewProducer(kafka.Config{Brokers: cfg.Kafka.Brokers, Topic: cfg.Kafka.HitsTopic})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	attacks, err = newAttackService(ctx, raids, catalog, producer)
+	if err != nil {
+		closeProducer(producer)
+		return nil, nil, nil, err
+	}
+	deps = dependencies{{name: "kafka", pinger: producer, timeout: kafkaPingTimeout}}
+	return attacks, deps, func() { closeProducer(producer) }, nil
 }
 
 // newAttackService собирает приём ударов: продюсер Kafka под предохранителем. Пока очередь недоступна,
