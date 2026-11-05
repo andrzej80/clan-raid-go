@@ -142,6 +142,10 @@ func publishError(ctx context.Context, err error) error {
 	if errors.Is(err, domain.ErrQueueUnavailable) {
 		return err // отказ предохранителя: причина уже в логе, не засоряем его на каждый запрос
 	}
+	// Режимы sync: рейд закончился между проверкой по кэшу и записью, игрока нет в БД.
+	if errors.Is(err, domain.ErrRaidNotActive) || errors.Is(err, domain.ErrPlayerNotFound) {
+		return err
+	}
 	slog.ErrorContext(ctx, "publish hit", "err", err)
 	return domain.ErrQueueUnavailable
 }

@@ -198,7 +198,11 @@ services:
       - KAFKA_BROKERS=kafka:9092
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 
       - OTEL_SERVICE_NAME=api
-      - OTEL_METRIC_EXPORT_INTERVAL=10000
+      - OTEL_METRIC_EXPORT_INTERVAL=${API_METRIC_INTERVAL_MS:-10000}
+      # Эксперимент этапа 9 (loadtest/hotrow.sh): режим приёма ударов и размер пула api.
+      # По умолчанию поведение прежнее: Kafka и пул по умолчанию (5).
+      - ATTACK_MODE=${ATTACK_MODE:-kafka}
+      - PG_MAX_CONNS=${API_PG_MAX_CONNS:-5}
     depends_on:
       pg:
         condition: service_healthy

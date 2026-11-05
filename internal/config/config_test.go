@@ -26,6 +26,34 @@ func TestLoadKafkaConsumerDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadAttackMode(t *testing.T) {
+	tests := []struct {
+		env     string
+		want    string
+		wantErr bool
+	}{
+		{env: "", want: AttackModeKafka},
+		{env: "kafka", want: AttackModeKafka},
+		{env: "sync", want: AttackModeSync},
+		{env: "sync-full", want: AttackModeSyncFull},
+		{env: "async", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.env, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "postgres://test@localhost/raidboss")
+			t.Setenv("ATTACK_MODE", tt.env)
+
+			cfg, err := Load()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Load() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err == nil && cfg.AttackMode != tt.want {
+				t.Fatalf("AttackMode = %q, want %q", cfg.AttackMode, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadRedis(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://test@localhost/raidboss")
 	t.Setenv("REDIS_URL", "redis://redis:6379")

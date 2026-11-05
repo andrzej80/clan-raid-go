@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -25,6 +26,9 @@ func runVerify(ctx context.Context, args []string, out io.Writer) error {
 	raidID := fs.String("raid", "", "check only this raid (default: all raids)")
 	requireRewards := fs.Bool("require-rewards", false,
 		"also fail on defeated raids without rewards (run after rewards-worker drained raid.events)")
+
+	skipDamage := fs.Bool("skip-damage-aggregate", false,
+		"ignore invariant 4 (raid_damage vs raid_hits): for ATTACK_MODE=sync, which does not maintain raid_damage")
 
 	// Redis проверяется, если задан REDIS_URL; --redis=false отключает проверку явно.
 	// Загрузка конфига до разбора флагов нужна ради значения по умолчанию.
@@ -58,6 +62,9 @@ func runVerify(ctx context.Context, args []string, out io.Writer) error {
 	violations, err := verify.Run(ctx, pool, raidIDs)
 	if err != nil {
 		return err
+	}
+	if *skipDamage {
+		violations = slices.DeleteFunc(violations, func(v verify.Violation) bool { return v.Invariant == 4 })
 	}
 	rewardViolations, err := verify.RunRewards(ctx, pool, raidIDs, *requireRewards)
 	if err != nil {
