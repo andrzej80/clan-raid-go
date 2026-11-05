@@ -83,7 +83,7 @@ func run(ctx context.Context, cfg *config.Config) error {
 	}
 	// Продюсер закрывается после GracefulStop (см. shutdown): идущие Attack ждут подтверждения брокера.
 	// Defer — страховка для раннего выхода по ошибке; OnceFunc не даст закрыть дважды.
-	closeKafka := sync.OnceFunc(closeProducerFn) //nolint:contextcheck // закрытие после отмены ctx сигналом
+	closeKafka := sync.OnceFunc(closeProducerFn)
 	defer closeKafka()
 
 	leaderboard, err := raid.NewLeaderboardService(raidRepo, rdb.NewBoard(redisClient.Redis()), pg.NewDamageRepo(dbPool))
@@ -334,11 +334,11 @@ func newAttackMode(
 	}
 	attacks, err = newAttackService(ctx, raids, catalog, producer)
 	if err != nil {
-		closeProducer(producer)
+		closeProducer(producer) //nolint:contextcheck // закрытие после отмены ctx сигналом: свой контекст с таймаутом
 		return nil, nil, nil, err
 	}
 	deps = dependencies{{name: "kafka", pinger: producer, timeout: kafkaPingTimeout}}
-	return attacks, deps, func() { closeProducer(producer) }, nil
+	return attacks, deps, func() { closeProducer(producer) }, nil //nolint:contextcheck // закрытие после отмены ctx сигналом: свой контекст с таймаутом
 }
 
 // newAttackService собирает приём ударов: продюсер Kafka под предохранителем. Пока очередь недоступна,
