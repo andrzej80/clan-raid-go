@@ -78,11 +78,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 	case SnapshotMsg:
-		m.applySnapshot(msg)
+		m = m.applySnapshot(msg)
 	case HPMsg:
-		m.applyHP(msg.HPLeft)
+		m = m.applyHP(msg.HPLeft)
 	case HitsMsg:
-		m.applyHits(msg.HitsTotal)
+		m = m.applyHits(msg.HitsTotal)
 	case LeaderboardMsg:
 		m.top = copyTop(msg.Entries)
 	case FinishedMsg:
@@ -100,7 +100,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = msg.Err
 		return m, tea.Quit
 	case TickMsg:
-		m.pushTick()
+		m = m.pushTick()
 		if m.finished {
 			return m, nil // таймер больше не нужен
 		}
@@ -112,7 +112,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // applySnapshot целиком заменяет состояние рейда. Скачок HP между старым значением и снимком
 // (например, после обрыва) уроном не считается: pending обнуляется. Топ не трогаем: после
 // snapshot сервер сам присылает свежий лидерборд, а до этого прошлый лучше пустого экрана.
-func (m *Model) applySnapshot(s SnapshotMsg) {
+func (m Model) applySnapshot(s SnapshotMsg) Model {
 	m.haveSnapshot = true
 	m.conn = ConnLive
 	m.bossName = s.BossName
@@ -121,40 +121,44 @@ func (m *Model) applySnapshot(s SnapshotMsg) {
 	m.hitsTotal, m.hitsKnown = 0, false
 	m.status = s.Status
 	m.pending = sample{}
+	return m
 }
 
 // applyHP принимает абсолютное значение hp_left. Убыль идёт в счётчик урона, рост (поздний
 // пакет, восстановление HP) просто принимается как есть.
-func (m *Model) applyHP(hp int64) {
+func (m Model) applyHP(hp int64) Model {
 	if !m.haveSnapshot || m.finished {
-		return
+		return m
 	}
 	hp = clampHP(hp, m.hpMax)
 	if hp < m.hpLeft {
 		m.pending.damage += m.hpLeft - hp
 	}
 	m.hpLeft = hp
+	return m
 }
 
 // applyHits принимает абсолютное число ударов; прирост идёт в счётчик скорости, кроме первого
 // значения после snapshot (иначе после переподключения весь накопленный счёт стал бы «скачком»).
-func (m *Model) applyHits(total int64) {
+func (m Model) applyHits(total int64) Model {
 	if !m.haveSnapshot || m.finished {
-		return
+		return m
 	}
 	total = max(total, 0)
 	if m.hitsKnown && total > m.hitsTotal {
 		m.pending.hits += total - m.hitsTotal
 	}
 	m.hitsTotal, m.hitsKnown = total, true
+	return m
 }
 
 // pushTick закрывает текущую секунду: пишет накопленную убыль HP в кольцо и обнуляет счётчик.
-func (m *Model) pushTick() {
+func (m Model) pushTick() Model {
 	m.window[m.next] = m.pending
 	m.next = (m.next + 1) % rateWindow
 	m.filled = min(m.filled+1, rateWindow)
 	m.pending = sample{}
+	return m
 }
 
 // sample — что изменилось за один тик.

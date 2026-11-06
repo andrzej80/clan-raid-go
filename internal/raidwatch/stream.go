@@ -51,7 +51,7 @@ func (c *WatchConfig) setDefaults() {
 		c.BackoffMax = max(defaultBackoffMax, c.BackoffMin)
 	}
 	if c.Rand == nil {
-		c.Rand = rand.Float64 //nolint:gosec // джиттер, не криптография
+		c.Rand = rand.Float64
 	}
 }
 
@@ -117,11 +117,9 @@ func jitter(d time.Duration, rnd func() float64) time.Duration {
 
 // isFatal: ошибки, которые повтор не исправит (нет такого рейда, плохой id, нет прав).
 func isFatal(err error) bool {
-	switch status.Code(err) {
-	case codes.NotFound, codes.InvalidArgument, codes.PermissionDenied, codes.Unauthenticated:
-		return true
-	}
-	return false
+	code := status.Code(err)
+	return code == codes.NotFound || code == codes.InvalidArgument ||
+		code == codes.PermissionDenied || code == codes.Unauthenticated
 }
 
 // watchOnce открывает один стрим и читает его до конца. progressed — получен ли snapshot,

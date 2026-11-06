@@ -241,12 +241,24 @@ func TestWatch_CancelDuringBackoffReturns(t *testing.T) {
 	cfg.BackoffMin, cfg.BackoffMax = time.Hour, time.Hour // без отмены ждали бы вечно
 
 	ctx, cancel := context.WithCancel(t.Context())
+	reconnecting := make(chan struct{})
+	var once sync.Once
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		collect(ctx, c, cfg)
+		Watch(ctx, c, cfg, func(m tea.Msg) {
+			if conn, ok := m.(ConnMsg); ok && conn.State == ConnReconnecting {
+				once.Do(func() { close(reconnecting) })
+			}
+		})
 	}()
-	time.Sleep(20 * time.Millisecond)
+
+	// ConnReconnecting кладётся в очередь перед самым ожиданием backoff.
+	select {
+	case <-reconnecting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reader did not reach the backoff")
+	}
 	cancel()
 
 	select {
@@ -256,52 +268,35 @@ func TestWatch_CancelDuringBackoffReturns(t *testing.T) {
 	}
 }
 
-func TestWatch_SlowReceiverDoesNotBlockReader(t *testing.T) {
+// Читатель не зависит от UI: watchLoop без единого читателя очереди должен дойти до конца стрима
+// сам, а в очереди остаются только последнее значение HP и финал.
+func TestWatch_ReaderDoesNotWaitForReceiver(t *testing.T) {
 	t.Parallel()
 	msgs := []*raidbossV1.WatchRaidResponse{snapshot(100000)}
 	for hp := int64(99999); hp > 0; hp-- {
 		msgs = append(msgs, hpUpdate(hp))
 	}
 	msgs = append(msgs, finished())
-	drained := make(chan struct{})
-	c := &fakeClient{attempts: []fakeAttempt{{msgs: msgs, drained: drained}}}
+	c := &fakeClient{attempts: []fakeAttempt{{msgs: msgs}}}
+	box := newMailbox()
 
-	release := make(chan struct{})
-	var (
-		mu  sync.Mutex
-		got []tea.Msg
-	)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		Watch(t.Context(), c, fastConfig(), func(m tea.Msg) {
-			<-release // «UI» стоит, пока читатель не прочитал весь стрим
-			mu.Lock()
-			got = append(got, m)
-			mu.Unlock()
-		})
+		watchLoop(t.Context(), c, fastConfig(), box)
 	}()
-
-	// Читатель обязан дойти до конца стрима, хотя send ещё ничего не принял.
-	select {
-	case <-drained:
-	case <-time.After(5 * time.Second):
-		t.Fatal("reader is blocked by a stalled receiver")
-	}
-	time.Sleep(50 * time.Millisecond) // последнее сообщение успевает попасть в очередь
-	close(release)
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("Watch did not finish")
+		t.Fatal("reader is blocked by the absence of a receiver")
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-	if len(got) > 10 {
-		t.Fatalf("delivered %d messages, want few (updates are coalesced)", len(got))
+	want := []tea.Msg{
+		SnapshotMsg{BossName: "boss", HPMax: 100, HPLeft: 100000},
+		HPMsg{HPLeft: 1},
+		FinishedMsg{Status: raidbossV1.RaidStatus_RAID_STATUS_DEFEATED, KillerPlayerID: 7},
 	}
-	if _, ok := got[len(got)-1].(FinishedMsg); !ok {
-		t.Fatalf("last message = %#v, want FinishedMsg", got[len(got)-1])
+	if got := drain(box); !reflect.DeepEqual(got, want) {
+		t.Fatalf("queue = %#v, want %#v", got, want)
 	}
 }

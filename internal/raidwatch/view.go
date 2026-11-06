@@ -72,9 +72,10 @@ func (m Model) connLabel() string {
 		return okStyle.Render("● live")
 	case ConnReconnecting:
 		return warnStyle.Render("◌ переподключение…")
-	default:
+	case ConnConnecting:
 		return warnStyle.Render("◌ подключение…")
 	}
+	return warnStyle.Render("◌ подключение…")
 }
 
 func (m Model) hpLine() string {
@@ -155,9 +156,9 @@ func (m Model) finalBanner() string {
 		return okStyle.Render("Босс повержен!") + fmt.Sprintf(" Добил игрок #%d.", m.killerPlayerID)
 	case raidbossV1.RaidStatus_RAID_STATUS_EXPIRED:
 		return warnStyle.Render("Время вышло: босс выстоял.")
-	default:
-		return dimStyle.Render("Рейд завершён.")
+	case raidbossV1.RaidStatus_RAID_STATUS_UNSPECIFIED, raidbossV1.RaidStatus_RAID_STATUS_ACTIVE:
 	}
+	return dimStyle.Render("Рейд завершён.")
 }
 
 // groupDigits разделяет разряды пробелами: 1234567 → «1 234 567».
