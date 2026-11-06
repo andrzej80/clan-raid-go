@@ -29,11 +29,18 @@ const UpdateLeaderboardSize = 10
 // Apply записывает состояние рейда после коммита в Postgres одним pipeline.
 //
 // totals — АБСОЛЮТНЫЕ суммы урона игроков (ZADD, а не ZINCRBY): повторная обработка пачки
-// просто перезапишет те же значения. В канал уходят два сообщения WatchRaidResponse: оставшееся
-// HP и топ лидерборда (его нужно прочитать после ZADD, поэтому это второй обмен с Redis).
-func (b *Board) Apply(ctx context.Context, raidID uuid.UUID, totals []domain.PlayerDamage, hpLeft int64) error {
+// просто перезапишет те же значения. В канал уходят три сообщения WatchRaidResponse: оставшееся
+// HP, число принятых ударов и топ лидерборда (его нужно прочитать после ZADD, поэтому это второй обмен с Redis).
+func (b *Board) Apply(ctx context.Context, raidID uuid.UUID, totals []domain.PlayerDamage, hpLeft, hitsTotal int64) error {
 	hpPayload, err := proto.Marshal(&raidbossV1.WatchRaidResponse{
 		Update: &raidbossV1.WatchRaidResponse_HpLeft{HpLeft: hpLeft},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal raid update: %w", err)
+	}
+
+	hitsPayload, err := proto.Marshal(&raidbossV1.WatchRaidResponse{
+		Update: &raidbossV1.WatchRaidResponse_HitsTotal{HitsTotal: hitsTotal},
 	})
 	if err != nil {
 		return fmt.Errorf("marshal raid update: %w", err)
@@ -49,6 +56,7 @@ func (b *Board) Apply(ctx context.Context, raidID uuid.UUID, totals []domain.Pla
 	}
 	pipe.Set(ctx, HPKey(raidID), hpLeft, 0)
 	pipe.Publish(ctx, UpdatesChannel(raidID), hpPayload)
+	pipe.Publish(ctx, UpdatesChannel(raidID), hitsPayload)
 	top := pipe.ZRevRangeWithScores(ctx, LeaderboardKey(raidID), 0, UpdateLeaderboardSize-1)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("apply raid state to redis: %w", err)

@@ -94,6 +94,8 @@ type raidStats struct {
 	// totals и hpLeft заполнены, если приняты новые удары: это состояние для Redis.
 	totals []domain.PlayerDamage
 	hpLeft int64
+	// hitsTotal — всего принято ударов в рейде с учётом этой пачки.
+	hitsTotal int64
 	// killer заполнен, если эта пачка добила босса.
 	killer *int64
 }
@@ -103,7 +105,7 @@ const boardWriteTimeout = 500 * time.Millisecond
 
 // BoardWriter записывает состояние рейда в Redis (лидерборд, HP, pub/sub) после коммита в Postgres.
 type BoardWriter interface {
-	Apply(ctx context.Context, raidID uuid.UUID, totals []domain.PlayerDamage, hpLeft int64) error
+	Apply(ctx context.Context, raidID uuid.UUID, totals []domain.PlayerDamage, hpLeft, hitsTotal int64) error
 }
 
 // FinishPublisher сообщает подписчикам WatchRaid об окончании рейда.
@@ -219,7 +221,7 @@ func (p *HitsProcessor) applyToBoard(ctx context.Context, raidID uuid.UUID, stat
 	defer cancel()
 
 	start := time.Now()
-	err := p.board.Apply(ctx, raidID, stats.totals, stats.hpLeft)
+	err := p.board.Apply(ctx, raidID, stats.totals, stats.hpLeft, stats.hitsTotal)
 	p.metrics.boardDuration.Record(ctx, time.Since(start).Seconds())
 	if err != nil {
 		slog.WarnContext(ctx, "redis board update failed, run raidctl rebuild-cache to repair", "raid_id", raidID, "err", err)
@@ -271,11 +273,11 @@ func (p *HitsProcessor) processRaid(ctx context.Context, group domain.RaidHits) 
 
 		out := domain.ApplyHits(state.HPLeft, fresh)
 		stats.accepted, stats.late = len(out.Accepted), stats.late+len(out.Late)
-		totals, err := p.persist(ctx, group.RaidID, out)
+		totals, hitsTotal, err := p.persist(ctx, group.RaidID, out)
 		if err != nil {
 			return err
 		}
-		stats.totals, stats.hpLeft = totals, out.HPLeft
+		stats.totals, stats.hpLeft, stats.hitsTotal = totals, out.HPLeft, hitsTotal
 		if out.Killing != nil {
 			stats.killer = &out.Killing.PlayerID
 		}
@@ -306,15 +308,22 @@ func (p *HitsProcessor) filterNew(ctx context.Context, hits []domain.Hit) ([]dom
 	return fresh, nil
 }
 
+// persist записывает пачку и возвращает абсолютные суммы урона затронутых игроков и общее число
+// ударов рейда: оно уходит в Redis вместе с остальным состоянием.
 func (p *HitsProcessor) persist(
 	ctx context.Context, raidID uuid.UUID, out domain.HitsOutcome,
-) ([]domain.PlayerDamage, error) {
+) ([]domain.PlayerDamage, int64, error) {
 	if err := p.hits.InsertHits(ctx, out.Accepted); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	totals, err := p.hits.AddDamage(ctx, raidID, domain.AggregateDamage(out.Accepted))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	// AddDamage вернул суммы только игроков пачки, поэтому общее число ударов считается отдельно.
+	hitsTotal, err := p.hits.CountHits(ctx, raidID)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	var kill *domain.Kill
@@ -322,12 +331,12 @@ func (p *HitsProcessor) persist(
 		kill = &domain.Kill{PlayerID: out.Killing.PlayerID, HitID: out.Killing.ID, FinishedAt: p.now()}
 	}
 	if err := p.hits.UpdateHP(ctx, raidID, out.HPLeft, kill); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if kill == nil {
-		return totals, nil
+		return totals, hitsTotal, nil
 	}
-	return totals, p.addDefeatedEvent(ctx, raidID, kill)
+	return totals, hitsTotal, p.addDefeatedEvent(ctx, raidID, kill)
 }
 
 func (p *HitsProcessor) addDefeatedEvent(ctx context.Context, raidID uuid.UUID, kill *domain.Kill) error {
