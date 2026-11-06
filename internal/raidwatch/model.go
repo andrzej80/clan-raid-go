@@ -6,11 +6,9 @@
 package raidwatch
 
 import (
-	"fmt"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	raidbossV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/v1"
 )
@@ -21,8 +19,6 @@ const (
 	rateWindow   = 5           // сколько последних тиков усредняем
 )
 
-var titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
-
 // Model — состояние экрана raidwatch.
 //
 // Update возвращает копию модели, поэтому в ней нет слайсов, которые мутируются на месте:
@@ -30,6 +26,7 @@ var titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212")
 type Model struct {
 	raidID string
 	conn   ConnState
+	width  int // ширина терминала; 0, пока не пришёл WindowSizeMsg
 
 	haveSnapshot bool
 	bossName     string
@@ -78,6 +75,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s := msg.String(); s == "q" || s == "ctrl+c" {
 			return m, tea.Quit
 		}
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
 	case SnapshotMsg:
 		m.applySnapshot(msg)
 	case HPMsg:
@@ -90,6 +89,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.finished = true
 		m.finalStatus = msg.Status
 		m.killerPlayerID = msg.KillerPlayerID
+		if msg.Status == raidbossV1.RaidStatus_RAID_STATUS_DEFEATED {
+			// Hub при finished выбрасывает ещё не отправленные обновления, так что последний hp_left
+			// мог не дойти; у побеждённого босса HP в любом случае 0.
+			m.hpLeft = 0
+		}
 	case ConnMsg:
 		m.conn = msg.State
 	case ErrorMsg:
@@ -184,12 +188,4 @@ func clampHP(hp, hpMax int64) int64 {
 // copyTop копирует первые topSize строк: сообщение читателя не должно делить память с моделью.
 func copyTop(in []Entry) []Entry {
 	return append([]Entry(nil), in[:min(len(in), topSize)]...)
-}
-
-// View рисует экран. Пока заглушка: настоящая отрисовка — в следующей части.
-func (m Model) View() string {
-	dps, hps := m.Rates()
-	return titleStyle.Render("raidwatch") +
-		fmt.Sprintf(" — рейд %s, hp %d/%d, ударов %d (%d/с), урон/с %d\n\nq или Ctrl+C — выход\n",
-			m.raidID, m.hpLeft, m.hpMax, m.hitsTotal, hps, dps)
 }
