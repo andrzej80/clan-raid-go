@@ -25,17 +25,32 @@ func main() {
 	os.Exit(realMain())
 }
 
+// stdinIsTerminal сообщает, подключён ли stdin к терминалу. В Git Bash (mintty) нативная программа
+// получает stdin как pipe: bubbletea не может читать клавиши, и q не работает.
+func stdinIsTerminal() bool {
+	info, err := os.Stdin.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
 // realMain отделён от main, чтобы defer stop() отработал до os.Exit.
 func realMain() int {
 	fs := flag.NewFlagSet("raidwatch", flag.ContinueOnError)
 	raidID := fs.String("raid", "", "id рейда (uuid)")
 	addr := fs.String("addr", "localhost:9090", "адрес gRPC-сервера api")
 	player := fs.Int64("player", 1, "id игрока для заголовка x-player-id (сервер требует его и для WatchRaid)")
+	force := fs.Bool("force", false, "запускаться, даже если stdin не терминал (клавиши тогда не работают)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return 2
 	}
 	if _, err := uuid.Parse(*raidID); err != nil {
 		fmt.Fprintln(os.Stderr, "raidwatch: нужен --raid <uuid>")
+		return 2
+	}
+
+	if !*force && !stdinIsTerminal() {
+		fmt.Fprintln(os.Stderr, "raidwatch: stdin не терминал, клавиши (q) до программы не дойдут.\n"+
+			"В Git Bash (mintty) запустите через winpty (winpty raidwatch --raid ...) или из Windows Terminal/PowerShell.\n"+
+			"--force запускает всё равно, выйти тогда можно только по Ctrl+C.")
 		return 2
 	}
 
@@ -53,7 +68,8 @@ func realMain() int {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	p := tea.NewProgram(raidwatch.New(*raidID), tea.WithContext(ctx))
+	// Полноэкранный режим: кадр выше окна в обычном режиме оставляет копии строк в прокрутке.
+	p := tea.NewProgram(raidwatch.New(*raidID), tea.WithContext(ctx), tea.WithAltScreen())
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		raidwatch.Watch(ctx, raidbossV1.NewRaidServiceClient(conn),

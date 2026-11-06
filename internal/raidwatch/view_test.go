@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	raidbossV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/v1"
 )
@@ -147,10 +148,70 @@ func TestView_FinishedExpired(t *testing.T) {
 	}
 }
 
+func TestView_FinishedWithoutLeaderboard(t *testing.T) {
+	t.Parallel()
+	// Рейд закончился до подключения: сервер присылает snapshot и finished без лидерборда.
+	m := apply(New("r"), SnapshotMsg{HPMax: 100}, FinishedMsg{Status: raidbossV1.RaidStatus_RAID_STATUS_EXPIRED})
+	out := m.View()
+	if !strings.Contains(out, "лидерборд недоступен") || strings.Contains(out, "никто не ударил") {
+		t.Errorf("view:\n%s", out)
+	}
+}
+
 func TestView_NarrowTerminalKeepsMinimumBar(t *testing.T) {
 	t.Parallel()
 	m := apply(New("r"), tea.WindowSizeMsg{Width: 20}, SnapshotMsg{HPMax: 100, HPLeft: 100})
 	if got := strings.Count(m.View(), "█"); got != minBarWidth {
 		t.Errorf("bar width = %d, want %d", got, minBarWidth)
+	}
+}
+
+// Строка HP не должна быть шире терминала: иначе её приходится обрезать или переносить,
+// и перерисовка кадра ломается. Проверяем самые длинные числа (9 знаков с разделителями).
+func TestView_HPLineFitsTerminalWidth(t *testing.T) {
+	t.Parallel()
+	for width := 60; width <= 200; width++ {
+		m := apply(New("r"), tea.WindowSizeMsg{Width: width, Height: 40},
+			SnapshotMsg{HPMax: 100_000_000, HPLeft: 100_000_000})
+		if got := lipgloss.Width(m.hpLine()); got > width {
+			t.Fatalf("width %d: hp line is %d wide:\n%s", width, got, m.hpLine())
+		}
+	}
+}
+
+func lineCount(s string) int {
+	return strings.Count(strings.TrimRight(s, "\n"), "\n") + 1
+}
+
+// Кадр не выше окна: иначе в обычном режиме верхние строки уходят в прокрутку и дублируются.
+func TestView_FrameFitsTerminalHeight(t *testing.T) {
+	t.Parallel()
+	top := make([]Entry, topSize)
+	for i := range top {
+		top[i] = Entry{PlayerID: int64(i + 1), Damage: int64(1000 - i)}
+	}
+	for height := 12; height <= 30; height++ {
+		live := apply(New("r"), tea.WindowSizeMsg{Width: 100, Height: height},
+			SnapshotMsg{HPMax: 100, HPLeft: 50}, LeaderboardMsg{Entries: top})
+		if got := lineCount(live.View()); got >= height {
+			t.Fatalf("height %d: live frame has %d lines", height, got)
+		}
+		done := apply(live, FinishedMsg{Status: raidbossV1.RaidStatus_RAID_STATUS_EXPIRED})
+		if got := lineCount(done.View()); got >= height {
+			t.Fatalf("height %d: final frame has %d lines", height, got)
+		}
+	}
+}
+
+func TestView_ShowsAllTopRowsWhenTall(t *testing.T) {
+	t.Parallel()
+	top := make([]Entry, topSize)
+	for i := range top {
+		top[i] = Entry{PlayerID: int64(i + 1), Damage: 100}
+	}
+	m := apply(New("r"), tea.WindowSizeMsg{Width: 100, Height: 50},
+		SnapshotMsg{HPMax: 100, HPLeft: 50}, LeaderboardMsg{Entries: top})
+	if got := strings.Count(m.View(), "игрок #"); got != topSize {
+		t.Fatalf("rows = %d, want %d", got, topSize)
 	}
 }

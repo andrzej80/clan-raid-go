@@ -14,7 +14,12 @@ const (
 	defaultWidth = 80 // пока терминал не сообщил свой размер
 	minBarWidth  = 10
 	maxBarWidth  = 60
-	barReserve   = 32 // место справа от полоски: подпись «1 234 567 / 5 000 000 (100%)»
+	hpPrefix     = "HP  " // перед полоской
+	hpGap        = 2      // пробелы между полоской и подписью
+	// Строки экрана вне таблицы: заголовок, пустая, HP, скорость, пустая, заголовок топа, пустая,
+	// подсказка и одна запасная (кадр не должен занимать всю высоту терминала).
+	fixedRows         = 9
+	finishedExtraRows = 2 // баннер итога и пустая строка после него
 )
 
 var (
@@ -83,14 +88,28 @@ func (m Model) hpLine() string {
 	if width <= 0 {
 		width = defaultWidth
 	}
-	barWidth := min(max(width-barReserve, minBarWidth), maxBarWidth)
+	label := fmt.Sprintf("%s / %s (%d%%)", groupDigits(m.hpLeft), groupDigits(m.hpMax), percent(m.hpLeft, m.hpMax))
+	// Строка должна помещаться в терминал: под полоску остаётся то, что не заняли префикс и подпись.
+	barWidth := min(max(width-len(hpPrefix)-hpGap-lipgloss.Width(label), minBarWidth), maxBarWidth)
 
 	frac := 0.0
 	if m.hpMax > 0 {
 		frac = float64(m.hpLeft) / float64(m.hpMax)
 	}
-	return fmt.Sprintf("HP  %s  %s / %s (%d%%)",
-		hpBar(frac, barWidth), groupDigits(m.hpLeft), groupDigits(m.hpMax), percent(m.hpLeft, m.hpMax))
+	return hpPrefix + hpBar(frac, barWidth) + strings.Repeat(" ", hpGap) + label
+}
+
+// visibleRows — сколько строк топа помещается по высоте терминала. Кадр выше окна нельзя
+// перерисовать, не оставив копий в прокрутке, поэтому лишние строки не выводятся.
+func (m Model) visibleRows() int {
+	if m.height <= 0 {
+		return topSize
+	}
+	fixed := fixedRows
+	if m.finished {
+		fixed += finishedExtraRows
+	}
+	return min(max(m.height-fixed, 0), topSize)
 }
 
 // hpBar рисует полоску из width ячеек; цвет зависит от остатка HP.
@@ -136,11 +155,16 @@ func (m Model) topTable() string {
 	b.WriteString(headerStyle.Render("Топ игроков"))
 	b.WriteString("\n")
 	if len(m.top) == 0 {
-		b.WriteString(dimStyle.Render("  пока никто не ударил"))
+		// Для рейда, завершённого до подключения, сервер лидерборд не присылает.
+		empty := "  пока никто не ударил"
+		if m.finished {
+			empty = "  лидерборд недоступен"
+		}
+		b.WriteString(dimStyle.Render(empty))
 		b.WriteString("\n")
 		return b.String()
 	}
-	for i, e := range m.top {
+	for i, e := range m.top[:min(len(m.top), m.visibleRows())] {
 		killer := ""
 		if m.finished && e.PlayerID == m.killerPlayerID && m.finalStatus == raidbossV1.RaidStatus_RAID_STATUS_DEFEATED {
 			killer = badStyle.Render("  ← добил")

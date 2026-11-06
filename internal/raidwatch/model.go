@@ -26,7 +26,8 @@ const (
 type Model struct {
 	raidID string
 	conn   ConnState
-	width  int // ширина терминала; 0, пока не пришёл WindowSizeMsg
+	width  int // размеры терминала; 0, пока не пришёл WindowSizeMsg
+	height int
 
 	haveSnapshot bool
 	bossName     string
@@ -76,7 +77,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
+		m.width, m.height = msg.Width, msg.Height
 	case SnapshotMsg:
 		m = m.applySnapshot(msg)
 	case HPMsg:
