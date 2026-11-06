@@ -34,7 +34,7 @@ func TestUpdates_DeliversPublishedUpdatesInOrder(t *testing.T) {
 		t.Fatal("source is not ready")
 	}
 
-	if err := b.Apply(t.Context(), raidID, []domain.PlayerDamage{dmg(1, 100)}, 900); err != nil {
+	if err := b.Apply(t.Context(), raidID, []domain.PlayerDamage{dmg(1, 100)}, 900, 10); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if err := b.PublishDefeated(t.Context(), raidID, 1); err != nil {
@@ -43,6 +43,7 @@ func TestUpdates_DeliversPublishedUpdatesInOrder(t *testing.T) {
 
 	for i, check := range []func(*raidbossV1.WatchRaidResponse) bool{
 		func(u *raidbossV1.WatchRaidResponse) bool { return u.GetHpLeft() == 900 },
+		func(u *raidbossV1.WatchRaidResponse) bool { return u.GetHitsTotal() == 10 },
 		func(u *raidbossV1.WatchRaidResponse) bool { return len(u.GetLeaderboard().GetEntries()) == 1 },
 		func(u *raidbossV1.WatchRaidResponse) bool { return u.GetFinished() != nil },
 	} {

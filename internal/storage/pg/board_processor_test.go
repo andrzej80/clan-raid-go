@@ -17,6 +17,7 @@ type boardCall struct {
 	raidID uuid.UUID
 	totals map[int64]int64
 	hpLeft int64
+	hits   int64
 }
 
 // recordingBoard запоминает вызовы Apply и может вернуть ошибку.
@@ -26,10 +27,10 @@ type recordingBoard struct {
 	err   error
 }
 
-func (b *recordingBoard) Apply(_ context.Context, raidID uuid.UUID, totals []domain.PlayerDamage, hpLeft int64) error {
+func (b *recordingBoard) Apply(_ context.Context, raidID uuid.UUID, totals []domain.PlayerDamage, hpLeft, hitsTotal int64) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	c := boardCall{raidID: raidID, totals: map[int64]int64{}, hpLeft: hpLeft}
+	c := boardCall{raidID: raidID, totals: map[int64]int64{}, hpLeft: hpLeft, hits: hitsTotal}
 	for _, t := range totals {
 		c.totals[t.PlayerID] = t.Damage
 	}
@@ -66,6 +67,10 @@ func TestHitsProcessor_BoardGetsAbsoluteTotals(t *testing.T) {
 	calls := board.callsFor(r.ID)
 	if len(calls) != 2 {
 		t.Fatalf("board calls = %d, want 2 (one per batch)", len(calls))
+	}
+	// Число ударов абсолютное: 2 в первой пачке, 3 после второй.
+	if calls[0].hits != 2 || calls[1].hits != 3 {
+		t.Fatalf("hits totals = %d, %d, want 2, 3", calls[0].hits, calls[1].hits)
 	}
 	if calls[0].hpLeft != 850 || calls[0].totals[env.players[0]] != 100 || calls[0].totals[env.players[1]] != 50 {
 		t.Fatalf("first call = %+v", calls[0])

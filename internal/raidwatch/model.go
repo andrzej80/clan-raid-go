@@ -2,42 +2,186 @@
 //
 // Состояние экрана лежит в Model, все изменения идут через Update, отрисовка — в View.
 // Сетевой код в Model не попадает: он присылает в программу сообщения tea.Msg.
+// Update не читает часы и не ходит в сеть, поэтому проверяется обычными тестами.
 package raidwatch
 
 import (
 	"fmt"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	raidbossV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/v1"
+)
+
+const (
+	topSize      = 10          // сколько строк лидерборда показываем
+	tickInterval = time.Second // шаг окна урона в секунду
+	rateWindow   = 5           // сколько последних тиков усредняем
 )
 
 var titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 
 // Model — состояние экрана raidwatch.
+//
+// Update возвращает копию модели, поэтому в ней нет слайсов, которые мутируются на месте:
+// окно урона — массив, топ каждый раз заменяется новым слайсом.
 type Model struct {
 	raidID string
+	conn   ConnState
+
+	haveSnapshot bool
+	bossName     string
+	hpMax        int64
+	hpLeft       int64
+	hitsTotal    int64
+	hitsKnown    bool // hitsTotal получен от сервера после последнего snapshot
+	status       raidbossV1.RaidStatus
+	top          []Entry
+
+	// Скорость считается по разнице абсолютных значений (убыль HP и прирост числа ударов), а не по
+	// числу сообщений: сервер шлёт обновления не чаще 4 раз в секунду на рейд и схлопывает лишние.
+	// pending копит разницу до очередного тика, затем она уходит в кольцо window.
+	pending sample
+	window  [rateWindow]sample
+	filled  int // сколько ячеек window заполнено
+	next    int // куда писать следующий тик
+
+	finished       bool
+	finalStatus    raidbossV1.RaidStatus
+	killerPlayerID int64
 }
 
 // New создаёт модель для рейда raidID.
 func New(raidID string) Model {
-	return Model{raidID: raidID}
+	return Model{raidID: raidID, conn: ConnConnecting}
 }
 
-// Init ничего не запускает: сетевые горутины стартуют снаружи и шлют сообщения через Program.Send.
-func (m Model) Init() tea.Cmd { return nil }
+// Init запускает таймер урона в секунду. Сетевые горутины стартуют снаружи и шлют сообщения
+// через Program.Send.
+func (m Model) Init() tea.Cmd { return tick() }
 
-// Update пока обрабатывает только выход; остальные сообщения появятся в следующих частях.
+func tick() tea.Cmd {
+	return tea.Tick(tickInterval, func(t time.Time) tea.Msg { return TickMsg(t) })
+}
+
+// Update применяет сообщение к состоянию.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if key, ok := msg.(tea.KeyMsg); ok {
-		switch key.String() {
-		case "q", "ctrl+c":
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if s := msg.String(); s == "q" || s == "ctrl+c" {
 			return m, tea.Quit
 		}
+	case SnapshotMsg:
+		m.applySnapshot(msg)
+	case HPMsg:
+		m.applyHP(msg.HPLeft)
+	case HitsMsg:
+		m.applyHits(msg.HitsTotal)
+	case LeaderboardMsg:
+		m.top = copyTop(msg.Entries)
+	case FinishedMsg:
+		m.finished = true
+		m.finalStatus = msg.Status
+		m.killerPlayerID = msg.KillerPlayerID
+	case ConnMsg:
+		m.conn = msg.State
+	case TickMsg:
+		m.pushTick()
+		if m.finished {
+			return m, nil // таймер больше не нужен
+		}
+		return m, tick()
 	}
 	return m, nil
 }
 
-// View рисует экран.
+// applySnapshot целиком заменяет состояние рейда. Скачок HP между старым значением и снимком
+// (например, после обрыва) уроном не считается: pending обнуляется. Топ не трогаем: после
+// snapshot сервер сам присылает свежий лидерборд, а до этого прошлый лучше пустого экрана.
+func (m *Model) applySnapshot(s SnapshotMsg) {
+	m.haveSnapshot = true
+	m.conn = ConnLive
+	m.bossName = s.BossName
+	m.hpMax = s.HPMax
+	m.hpLeft = clampHP(s.HPLeft, s.HPMax)
+	m.hitsTotal, m.hitsKnown = 0, false
+	m.status = s.Status
+	m.pending = sample{}
+}
+
+// applyHP принимает абсолютное значение hp_left. Убыль идёт в счётчик урона, рост (поздний
+// пакет, восстановление HP) просто принимается как есть.
+func (m *Model) applyHP(hp int64) {
+	if !m.haveSnapshot || m.finished {
+		return
+	}
+	hp = clampHP(hp, m.hpMax)
+	if hp < m.hpLeft {
+		m.pending.damage += m.hpLeft - hp
+	}
+	m.hpLeft = hp
+}
+
+// applyHits принимает абсолютное число ударов; прирост идёт в счётчик скорости, кроме первого
+// значения после snapshot (иначе после переподключения весь накопленный счёт стал бы «скачком»).
+func (m *Model) applyHits(total int64) {
+	if !m.haveSnapshot || m.finished {
+		return
+	}
+	total = max(total, 0)
+	if m.hitsKnown && total > m.hitsTotal {
+		m.pending.hits += total - m.hitsTotal
+	}
+	m.hitsTotal, m.hitsKnown = total, true
+}
+
+// pushTick закрывает текущую секунду: пишет накопленную убыль HP в кольцо и обнуляет счётчик.
+func (m *Model) pushTick() {
+	m.window[m.next] = m.pending
+	m.next = (m.next + 1) % rateWindow
+	m.filled = min(m.filled+1, rateWindow)
+	m.pending = sample{}
+}
+
+// sample — что изменилось за один тик.
+type sample struct {
+	damage int64 // на сколько убыло HP
+	hits   int64 // сколько ударов принято
+}
+
+// Rates возвращает средние за последние тики урон и число ударов в секунду
+// (нули, пока не было ни одного тика).
+func (m Model) Rates() (dps, hps int64) {
+	if m.filled == 0 {
+		return 0, 0
+	}
+	var sum sample
+	for i := range m.filled {
+		sum.damage += m.window[i].damage
+		sum.hits += m.window[i].hits
+	}
+	return sum.damage / int64(m.filled), sum.hits / int64(m.filled)
+}
+
+func clampHP(hp, hpMax int64) int64 {
+	hp = max(hp, 0)
+	if hpMax > 0 {
+		hp = min(hp, hpMax)
+	}
+	return hp
+}
+
+// copyTop копирует первые topSize строк: сообщение читателя не должно делить память с моделью.
+func copyTop(in []Entry) []Entry {
+	return append([]Entry(nil), in[:min(len(in), topSize)]...)
+}
+
+// View рисует экран. Пока заглушка: настоящая отрисовка — в следующей части.
 func (m Model) View() string {
-	return titleStyle.Render("raidwatch") + fmt.Sprintf(" — рейд %s\n\nq или Ctrl+C — выход\n", m.raidID)
+	dps, hps := m.Rates()
+	return titleStyle.Render("raidwatch") +
+		fmt.Sprintf(" — рейд %s, hp %d/%d, ударов %d (%d/с), урон/с %d\n\nq или Ctrl+C — выход\n",
+			m.raidID, m.hpLeft, m.hpMax, m.hitsTotal, hps, dps)
 }

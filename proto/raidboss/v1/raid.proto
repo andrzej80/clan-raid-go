@@ -81,6 +81,7 @@ message WatchRaidResponse {
     int64 hp_left = 2;
     GetLeaderboardResponse leaderboard = 3;
     RaidFinished finished = 4; // последнее сообщение, затем сервер закрывает стрим
+    int64 hits_total = 5; // принято ударов в рейде; абсолютное значение, как hp_left
   }
 }
 message RaidFinished {

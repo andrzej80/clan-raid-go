@@ -7,12 +7,13 @@
 package raidbossv1
 
 import (
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
-	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
-	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
+
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
@@ -679,6 +680,7 @@ type WatchRaidResponse struct {
 	//	*WatchRaidResponse_HpLeft
 	//	*WatchRaidResponse_Leaderboard
 	//	*WatchRaidResponse_Finished
+	//	*WatchRaidResponse_HitsTotal
 	Update        isWatchRaidResponse_Update `protobuf_oneof:"update"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -757,6 +759,15 @@ func (x *WatchRaidResponse) GetFinished() *RaidFinished {
 	return nil
 }
 
+func (x *WatchRaidResponse) GetHitsTotal() int64 {
+	if x != nil {
+		if x, ok := x.Update.(*WatchRaidResponse_HitsTotal); ok {
+			return x.HitsTotal
+		}
+	}
+	return 0
+}
+
 type isWatchRaidResponse_Update interface {
 	isWatchRaidResponse_Update()
 }
@@ -777,6 +788,10 @@ type WatchRaidResponse_Finished struct {
 	Finished *RaidFinished `protobuf:"bytes,4,opt,name=finished,proto3,oneof"` // последнее сообщение, затем сервер закрывает стрим
 }
 
+type WatchRaidResponse_HitsTotal struct {
+	HitsTotal int64 `protobuf:"varint,5,opt,name=hits_total,json=hitsTotal,proto3,oneof"` // принято ударов в рейде; абсолютное значение, как hp_left
+}
+
 func (*WatchRaidResponse_Snapshot) isWatchRaidResponse_Update() {}
 
 func (*WatchRaidResponse_HpLeft) isWatchRaidResponse_Update() {}
@@ -784,6 +799,8 @@ func (*WatchRaidResponse_HpLeft) isWatchRaidResponse_Update() {}
 func (*WatchRaidResponse_Leaderboard) isWatchRaidResponse_Update() {}
 
 func (*WatchRaidResponse_Finished) isWatchRaidResponse_Update() {}
+
+func (*WatchRaidResponse_HitsTotal) isWatchRaidResponse_Update() {}
 
 type RaidFinished struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
@@ -1030,12 +1047,14 @@ const file_raidboss_v1_raid_proto_rawDesc = "" +
 	"\x16GetLeaderboardResponse\x127\n" +
 	"\aentries\x18\x01 \x03(\v2\x1d.raidboss.v1.LeaderboardEntryR\aentries\"+\n" +
 	"\x10WatchRaidRequest\x12\x17\n" +
-	"\araid_id\x18\x01 \x01(\tR\x06raidId\"\xeb\x01\n" +
+	"\araid_id\x18\x01 \x01(\tR\x06raidId\"\x8c\x02\n" +
 	"\x11WatchRaidResponse\x12/\n" +
 	"\bsnapshot\x18\x01 \x01(\v2\x11.raidboss.v1.RaidH\x00R\bsnapshot\x12\x19\n" +
 	"\ahp_left\x18\x02 \x01(\x03H\x00R\x06hpLeft\x12G\n" +
 	"\vleaderboard\x18\x03 \x01(\v2#.raidboss.v1.GetLeaderboardResponseH\x00R\vleaderboard\x127\n" +
-	"\bfinished\x18\x04 \x01(\v2\x19.raidboss.v1.RaidFinishedH\x00R\bfinishedB\b\n" +
+	"\bfinished\x18\x04 \x01(\v2\x19.raidboss.v1.RaidFinishedH\x00R\bfinished\x12\x1f\n" +
+	"\n" +
+	"hits_total\x18\x05 \x01(\x03H\x00R\thitsTotalB\b\n" +
 	"\x06update\"i\n" +
 	"\fRaidFinished\x12/\n" +
 	"\x06status\x18\x01 \x01(\x0e2\x17.raidboss.v1.RaidStatusR\x06status\x12(\n" +
@@ -1137,6 +1156,7 @@ func file_raidboss_v1_raid_proto_init() {
 		(*WatchRaidResponse_HpLeft)(nil),
 		(*WatchRaidResponse_Leaderboard)(nil),
 		(*WatchRaidResponse_Finished)(nil),
+		(*WatchRaidResponse_HitsTotal)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{

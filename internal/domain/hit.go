@@ -49,6 +49,8 @@ type HitsRepository interface {
 	InsertHits(ctx context.Context, hits []Hit) error
 	// AddDamage прибавляет урон к raid_damage и возвращает абсолютные суммы затронутых игроков.
 	AddDamage(ctx context.Context, raidID uuid.UUID, delta []PlayerDamage) ([]PlayerDamage, error)
+	// CountHits возвращает, сколько ударов приняли все игроки рейда (сумма raid_damage.hits).
+	CountHits(ctx context.Context, raidID uuid.UUID) (int64, error)
 	// UpdateHP сохраняет hp_left; при kill != nil переводит рейд в defeated.
 	UpdateHP(ctx context.Context, raidID uuid.UUID, hpLeft int64, kill *Kill) error
 }

@@ -141,6 +141,18 @@ func (r *HitsRepo) AddDamage(ctx context.Context, raidID uuid.UUID, delta []doma
 	return totals, nil
 }
 
+// CountHits суммирует raid_damage.hits по игрокам рейда: сканирование по первичному ключу
+// (raid_id, player_id), порядка тысяч строк. Вызывается раз на пачку, а не на удар.
+func (r *HitsRepo) CountHits(ctx context.Context, raidID uuid.UUID) (int64, error) {
+	var total int64
+	err := conn(ctx, r.pool).QueryRow(ctx,
+		`SELECT COALESCE(sum(hits), 0)::bigint FROM raid_damage WHERE raid_id = $1`, raidID).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("count raid hits: %w", err)
+	}
+	return total, nil
+}
+
 func (r *HitsRepo) UpdateHP(ctx context.Context, raidID uuid.UUID, hpLeft int64, kill *domain.Kill) error {
 	var err error
 	if kill == nil {

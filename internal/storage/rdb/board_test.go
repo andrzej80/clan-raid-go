@@ -56,7 +56,7 @@ func TestBoard_ApplyAndTop(t *testing.T) {
 	t.Parallel()
 	b, raidID := newBoard(t), uuid.New()
 
-	if err := b.Apply(context.Background(), raidID, []domain.PlayerDamage{dmg(1, 100), dmg(2, 300), dmg(3, 200)}, 400); err != nil {
+	if err := b.Apply(context.Background(), raidID, []domain.PlayerDamage{dmg(1, 100), dmg(2, 300), dmg(3, 200)}, 400, 10); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 
@@ -83,7 +83,7 @@ func TestBoard_ApplyIsIdempotent(t *testing.T) {
 	totals := []domain.PlayerDamage{dmg(1, 100), dmg(2, 300)}
 
 	for range 3 {
-		if err := b.Apply(context.Background(), raidID, totals, 600); err != nil {
+		if err := b.Apply(context.Background(), raidID, totals, 600, 10); err != nil {
 			t.Fatalf("Apply: %v", err)
 		}
 	}
@@ -100,8 +100,8 @@ func TestBoard_ApplyOverwritesWithNewerTotals(t *testing.T) {
 	t.Parallel()
 	b, raidID := newBoard(t), uuid.New()
 
-	_ = b.Apply(context.Background(), raidID, []domain.PlayerDamage{dmg(1, 100)}, 900)
-	_ = b.Apply(context.Background(), raidID, []domain.PlayerDamage{dmg(1, 250)}, 750)
+	_ = b.Apply(context.Background(), raidID, []domain.PlayerDamage{dmg(1, 100)}, 900, 10)
+	_ = b.Apply(context.Background(), raidID, []domain.PlayerDamage{dmg(1, 250)}, 750, 10)
 
 	got, _ := b.Top(context.Background(), raidID, 10)
 	if len(got) != 1 || got[0].TotalDamage != 250 {
@@ -131,7 +131,7 @@ func TestBoard_ApplyPublishesHP(t *testing.T) {
 		t.Fatalf("subscribe: %v", err)
 	}
 
-	if err := b.Apply(ctx, raidID, []domain.PlayerDamage{dmg(1, 100)}, 321); err != nil {
+	if err := b.Apply(ctx, raidID, []domain.PlayerDamage{dmg(1, 100)}, 321, 10); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	msg, err := sub.ReceiveMessage(ctx)
@@ -177,12 +177,15 @@ func TestBoard_ApplyPublishesLeaderboardAfterHP(t *testing.T) {
 	defer cancel()
 	sub := subscribeUpdates(t, ctx, raidID)
 
-	if err := b.Apply(ctx, raidID, []domain.PlayerDamage{dmg(1, 100), dmg(2, 300)}, 600); err != nil {
+	if err := b.Apply(ctx, raidID, []domain.PlayerDamage{dmg(1, 100), dmg(2, 300)}, 600, 10); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 
 	if hp := receiveUpdate(t, ctx, sub); hp.GetHpLeft() != 600 {
 		t.Fatalf("first update = %v, want hp_left=600", hp)
+	}
+	if hits := receiveUpdate(t, ctx, sub); hits.GetHitsTotal() != 10 {
+		t.Fatalf("second update = %v, want hits_total=10", hits)
 	}
 	entries := receiveUpdate(t, ctx, sub).GetLeaderboard().GetEntries()
 	if len(entries) != 2 || entries[0].GetPlayerId() != 2 || entries[0].GetTotalDamage() != 300 ||

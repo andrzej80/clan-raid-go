@@ -10,7 +10,7 @@ import (
 // Сам по себе не потокобезопасен: Hub синхронизирует доступ.
 //
 // Троттлинг: первое обновление после паузы уходит сразу, дальше не чаще одного раза за
-// interval. Накопленные за интервал hp_left и leaderboard схлопываются до последних значений.
+// interval. Накопленные за интервал hp_left, hits_total и leaderboard схлопываются до последних значений.
 type room struct {
 	subs     map[*Subscription]struct{}
 	stopFeed func()
@@ -22,6 +22,7 @@ type room struct {
 	armed    bool // ждём срабатывания таймера
 	finished bool
 	hp       *Update
+	hits     *Update
 	lb       *Update
 }
 
@@ -39,11 +40,13 @@ func (r *room) accept(now time.Time, u *Update) (out []*Update, wait time.Durati
 	case *raidbossV1.WatchRaidResponse_Finished:
 		// Конец рейда не троттлится, а накопленные обновления уже не нужны.
 		r.finished = true
-		r.hp, r.lb, r.armed = nil, nil, false
+		r.hp, r.hits, r.lb, r.armed = nil, nil, nil, false
 		r.stopTimer()
 		return []*Update{u}, 0
 	case *raidbossV1.WatchRaidResponse_HpLeft:
 		r.hp = u
+	case *raidbossV1.WatchRaidResponse_HitsTotal:
+		r.hits = u
 	case *raidbossV1.WatchRaidResponse_Leaderboard:
 		r.lb = u
 	default:
@@ -77,10 +80,13 @@ func (r *room) drain() []*Update {
 	if r.hp != nil {
 		out = append(out, r.hp)
 	}
+	if r.hits != nil {
+		out = append(out, r.hits)
+	}
 	if r.lb != nil {
 		out = append(out, r.lb)
 	}
-	r.hp, r.lb = nil, nil
+	r.hp, r.hits, r.lb = nil, nil, nil
 	return out
 }
 
