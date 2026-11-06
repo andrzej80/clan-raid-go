@@ -48,6 +48,8 @@ type Model struct {
 	filled  int // сколько ячеек window заполнено
 	next    int // куда писать следующий тик
 
+	err error // фатальная ошибка стрима
+
 	finished       bool
 	finalStatus    raidbossV1.RaidStatus
 	killerPlayerID int64
@@ -57,6 +59,9 @@ type Model struct {
 func New(raidID string) Model {
 	return Model{raidID: raidID, conn: ConnConnecting}
 }
+
+// Err возвращает фатальную ошибку стрима, из-за которой программа завершилась.
+func (m Model) Err() error { return m.err }
 
 // Init запускает таймер урона в секунду. Сетевые горутины стартуют снаружи и шлют сообщения
 // через Program.Send.
@@ -87,6 +92,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.killerPlayerID = msg.KillerPlayerID
 	case ConnMsg:
 		m.conn = msg.State
+	case ErrorMsg:
+		m.err = msg.Err
+		return m, tea.Quit
 	case TickMsg:
 		m.pushTick()
 		if m.finished {

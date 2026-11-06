@@ -63,5 +63,10 @@ type ConnMsg struct {
 	State ConnState
 }
 
+// ErrorMsg — ошибка, после которой стрим не переподключается (например, рейда нет).
+type ErrorMsg struct {
+	Err error
+}
+
 // TickMsg приходит раз в tickInterval: сдвигает окно для расчёта урона в секунду.
 type TickMsg time.Time

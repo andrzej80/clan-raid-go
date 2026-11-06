@@ -9,11 +9,15 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/google/uuid"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
+	raidbossV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/v1"
 	"github.com/andrzej80/clan-raid-go/internal/raidwatch"
 )
 
@@ -34,16 +38,37 @@ func realMain() int {
 		fmt.Fprintln(os.Stderr, "raidwatch: нужен --raid <uuid>")
 		return 2
 	}
-	_ = addr
-	_ = player
 
-	// Ctrl+C приходит и как сигнал, и как клавиша в raw-режиме терминала: отмена ctx закроет стрим в части 3.
+	conn, err := grpc.NewClient(*addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "raidwatch:", err)
+		return 1
+	}
+	defer conn.Close() //nolint:errcheck // выход из программы
+
+	// Ctrl+C приходит и как сигнал, и как клавиша в raw-режиме терминала (её ловит сама программа).
+	// В обоих случаях отмена ctx закрывает стрим.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	p := tea.NewProgram(raidwatch.New(*raidID), tea.WithContext(ctx))
-	if _, err := p.Run(); err != nil {
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		raidwatch.Watch(ctx, raidbossV1.NewRaidServiceClient(conn),
+			raidwatch.WatchConfig{RaidID: *raidID, PlayerID: *player}, p.Send)
+	})
+
+	final, err := p.Run()
+	cancel() // программа закончилась: останавливаем читателя и ждём его выхода
+	wg.Wait()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "raidwatch:", err)
+		return 1
+	}
+	if m, ok := final.(raidwatch.Model); ok && m.Err() != nil {
+		fmt.Fprintln(os.Stderr, "raidwatch:", m.Err())
 		return 1
 	}
 	return 0
