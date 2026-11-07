@@ -38,6 +38,9 @@ type processorMetrics struct {
 
 	boardDuration metric.Float64Histogram
 	boardErrors   metric.Int64Counter
+	// freshness — от приёма удара в api (created_at) до коммита в Postgres: SLI «удар виден в игре».
+	// Границы корзин — общие для гистограмм в секундах (telemetry.durationBuckets), порог SLO 2 с среди них.
+	freshness metric.Float64Histogram
 }
 
 func newProcessorMetrics(mp metric.MeterProvider) (*processorMetrics, error) {
@@ -76,8 +79,15 @@ func newProcessorMetrics(mp metric.MeterProvider) (*processorMetrics, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create board errors counter: %w", err)
 	}
+	freshness, err := meter.Float64Histogram("raidboss.consumer.hit.freshness",
+		metric.WithDescription("Time from accepting a hit in the API to committing it to PostgreSQL"),
+		metric.WithUnit("s"))
+	if err != nil {
+		return nil, fmt.Errorf("create hit freshness histogram: %w", err)
+	}
 	return &processorMetrics{
 		hits: hits, batchSize: size, duration: dur, boardDuration: boardDur, boardErrors: boardErrs,
+		freshness: freshness,
 	}, nil
 }
 
@@ -98,6 +108,8 @@ type raidStats struct {
 	hitsTotal int64
 	// killer заполнен, если эта пачка добила босса.
 	killer *int64
+	// acceptedAt — created_at принятых ударов, для метрики свежести после коммита.
+	acceptedAt []time.Time
 }
 
 // boardWriteTimeout ограничивает запись в Redis: медленный Redis не должен тормозить обработку ударов.
@@ -200,12 +212,21 @@ func (p *HitsProcessor) ProcessBatch(ctx context.Context, batch []domain.Hit) (d
 		p.metrics.addHits(ctx, outcomeAccepted, stats.accepted)
 		p.metrics.addHits(ctx, outcomeLate, stats.late)
 		p.metrics.addHits(ctx, outcomeDuplicate, stats.duplicate)
+		p.recordFreshness(ctx, stats.acceptedAt)
 		p.applyToBoard(ctx, group.RaidID, stats)
 		p.publishDefeated(ctx, group.RaidID, stats)
 	}
 
 	p.metrics.duration.Record(ctx, time.Since(start).Seconds())
 	return result, nil
+}
+
+// recordFreshness — после коммита: удар «виден в игре», когда он в Postgres.
+func (p *HitsProcessor) recordFreshness(ctx context.Context, acceptedAt []time.Time) {
+	now := p.now()
+	for _, at := range acceptedAt {
+		p.metrics.freshness.Record(ctx, max(now.Sub(at).Seconds(), 0))
+	}
 }
 
 // applyToBoard обновляет Redis после коммита транзакции рейда (не внутри неё: откат не должен
@@ -278,6 +299,9 @@ func (p *HitsProcessor) processRaid(ctx context.Context, group domain.RaidHits) 
 			return err
 		}
 		stats.totals, stats.hpLeft, stats.hitsTotal = totals, out.HPLeft, hitsTotal
+		for _, h := range out.Accepted {
+			stats.acceptedAt = append(stats.acceptedAt, h.CreatedAt)
+		}
 		if out.Killing != nil {
 			stats.killer = &out.Killing.PlayerID
 		}

@@ -59,6 +59,10 @@ jobs:
     - name: build
       run: go build ./...
 
+    - name: alert rules
+      # Синтаксис правил vmalert и их юнит-тесты (deploy/alerts/tests), нужен только Docker.
+      run: bash deploy/alerts/test.sh
+
     - name: tests
       env:
         REQUIRE_DOCKER: "true"

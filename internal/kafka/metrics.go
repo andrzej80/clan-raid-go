@@ -113,7 +113,7 @@ func registerLagGauge(mp metric.MeterProvider, c *Consumer) (metric.Registration
 		return nil, fmt.Errorf("create lag gauge: %w", err)
 	}
 	retrying, err := meter.Float64ObservableGauge("raidboss.kafka.consumer.retrying",
-		metric.WithDescription("How long the current batch of the partition has been failing and retried; 0 when it is not"),
+		metric.WithDescription("How long the partition has been on its current batch since the batch failed at least once (counted from its first attempt); 0 when the batch is not retried"),
 		metric.WithUnit("s"))
 	if err != nil {
 		return nil, fmt.Errorf("create retrying gauge: %w", err)

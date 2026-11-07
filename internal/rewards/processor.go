@@ -40,6 +40,9 @@ type metrics struct {
 	events   metric.Int64Counter
 	granted  metric.Int64Counter
 	duration metric.Float64Histogram
+	// delay — от победы над боссом (finished_at) до записи наград: SLI «награды выданы». Границы
+	// корзин — общие для гистограмм в секундах (telemetry.durationBuckets), порог SLO 30 с среди них.
+	delay metric.Float64Histogram
 }
 
 func newMetrics(mp metric.MeterProvider) (*metrics, error) {
@@ -66,7 +69,13 @@ func newMetrics(mp metric.MeterProvider) (*metrics, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create duration histogram: %w", err)
 	}
-	return &metrics{events: events, granted: granted, duration: dur}, nil
+	delay, err := meter.Float64Histogram("raidboss.rewards.delay",
+		metric.WithDescription("Time from the boss being defeated to its rewards being written"),
+		metric.WithUnit("s"))
+	if err != nil {
+		return nil, fmt.Errorf("create delay histogram: %w", err)
+	}
+	return &metrics{events: events, granted: granted, duration: dur, delay: delay}, nil
 }
 
 func (m *metrics) event(ctx context.Context, outcome string) {
@@ -140,12 +149,16 @@ func (p *Processor) ProcessEvents(ctx context.Context, events []domain.RaidEvent
 
 func (p *Processor) grant(ctx context.Context, raidID uuid.UUID) (string, error) {
 	start := time.Now()
-	var inserted []domain.Reward
+	var (
+		inserted   []domain.Reward
+		finishedAt *time.Time
+	)
 
 	err := p.tx.WithinTx(ctx, func(ctx context.Context) error {
-		inserted = nil // функция может выполниться повторно при ретрае транзакции
+		inserted, finishedAt = nil, nil // функция может выполниться повторно при ретрае транзакции
 
 		out, err := p.repo.RaidOutcome(ctx, raidID)
+		finishedAt = out.FinishedAt
 		if err != nil {
 			return err
 		}
@@ -179,6 +192,10 @@ func (p *Processor) grant(ctx context.Context, raidID uuid.UUID) (string, error)
 	}
 	if len(inserted) == 0 {
 		return outcomeDuplicate, nil
+	}
+	// Только при первой выдаче: повторная доставка события задержку не меняет.
+	if finishedAt != nil {
+		p.metrics.delay.Record(ctx, max(time.Since(*finishedAt).Seconds(), 0))
 	}
 	return outcomeGranted, nil
 }

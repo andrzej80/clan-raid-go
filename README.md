@@ -73,6 +73,8 @@
 
 Сервисы знают только один адрес — `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317`. Батчинг, повторы, сэмплирование и выбор бэкендов настраиваются в коллекторе, а не в каждом сервисе. В compose коллектор один (gateway); в Kubernetes его обычно ставят агентом на узел или sidecar'ом рядом с сервисом.
 
+**SLO и алерты (этап 11, B1/B2/B4).** `vmalert` вычисляет записи SLI и алерты из `deploy/alerts/` по данным VictoriaMetrics. Активные алерты — `http://localhost:8880/vmalert/alerts`, они же — в таблице вверху дашборда «RaidBoss», рядом с панелями SLO. У каждого алерта есть `runbook_url` на инструкцию в [docs/runbooks/](docs/runbooks/README.md). Правила проверяются командой `deploy/alerts/test.sh` (нужен Docker); она же запускается в CI. Цели SLO и список алертов — в [docs/stage-11-hardening.md](docs/stage-11-hardening.md) (B1, B2).
+
 Базовый конфиг (этап 0, без сэмплирования):
 
 ```yml

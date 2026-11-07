@@ -148,6 +148,31 @@ services:
       - app
     restart: always
 
+  # --- vmalert: правила SLI и алерты (deploy/alerts, этап 11, B1/B2) ---
+  # Recording rules пишутся обратно в VictoriaMetrics, состояние алертов — тоже (ряд ALERTS), его
+  # видно в Grafana. Уведомлений нет (-notifier.blackhole): в продакшене здесь адрес Alertmanager.
+  # Активные алерты: http://localhost:8880/vmalert/alerts
+  vmalert:
+    image: victoriametrics/vmalert:v1.153.0
+    container_name: vmalert
+    volumes:
+      - ./alerts:/etc/alerts:ro
+    command:
+      - '-rule=/etc/alerts/*.yml'
+      - '-datasource.url=http://victoriametrics:8428'
+      - '-remoteWrite.url=http://victoriametrics:8428'
+      - '-remoteRead.url=http://victoriametrics:8428'
+      - '-notifier.blackhole'
+      - '-evaluationInterval=1m'
+      - '-httpListenAddr=:8880'
+    ports:
+      - "8880:8880"
+    depends_on:
+      - victoriametrics
+    networks:
+      - app
+    restart: always
+
   # --- Grafana Tempo ---
   tempo:
     image: grafana/tempo:2.4.1

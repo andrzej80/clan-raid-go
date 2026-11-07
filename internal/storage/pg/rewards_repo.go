@@ -28,8 +28,8 @@ func (r *RewardsRepo) RaidOutcome(ctx context.Context, raidID uuid.UUID) (domain
 		status string
 	)
 	err := conn(ctx, r.pool).QueryRow(ctx,
-		`SELECT status, killer_player_id FROM raids WHERE id = $1`, raidID,
-	).Scan(&status, &out.KillerPlayerID)
+		`SELECT status, killer_player_id, finished_at FROM raids WHERE id = $1`, raidID,
+	).Scan(&status, &out.KillerPlayerID, &out.FinishedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.RaidOutcome{}, domain.ErrRaidNotFound

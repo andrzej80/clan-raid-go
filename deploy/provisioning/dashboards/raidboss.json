@@ -23,6 +23,357 @@
   "panels": [
     {
       "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "description": "Доля ответов Attack без UNAVAILABLE/INTERNAL/DEADLINE_EXCEEDED; RESOURCE_EXHAUSTED не учитывается. Recording rule из deploy/alerts/slo.yml.",
+      "id": 100,
+      "title": "SLO: Attack без сбоя (1 ч, цель 99,9%)",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0.999
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "editorMode": "code",
+          "expr": "1 - raidboss:attack_error_ratio:rate1h",
+          "instant": false,
+          "range": true,
+          "refId": "A",
+          "legendFormat": "__auto"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "description": "Какая доля бюджета ошибок SLO 99,9% за 28 дней ещё не израсходована. Ниже нуля — SLO нарушен.",
+      "id": 101,
+      "title": "Бюджет ошибок Attack: остаток (28 дн)",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 0.25
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "editorMode": "code",
+          "expr": "1 - ((sum(increase(rpc_server_call_duration_seconds_count{rpc_method=\"raidboss.v1.RaidService/Attack\",rpc_response_status_code=~\"(?i)unavailable|internal|deadline_exceeded|unknown|data_loss\"}[28d])) or vector(0)) / sum(increase(rpc_server_call_duration_seconds_count{rpc_method=\"raidboss.v1.RaidService/Attack\",rpc_response_status_code!~\"(?i)resource_exhausted\"}[28d]))) / 0.001",
+          "instant": false,
+          "range": true,
+          "refId": "A",
+          "legendFormat": "__auto"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "description": "Доля ударов, дошедших от приёма в api до коммита в Postgres быстрее 2 с.",
+      "id": 102,
+      "title": "SLO: удары в базе быстрее 2 с (1 ч, цель 99%)",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0.99
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "editorMode": "code",
+          "expr": "1 - raidboss:hit_stale_ratio:rate1h",
+          "instant": false,
+          "range": true,
+          "refId": "A",
+          "legendFormat": "__auto"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "description": "От победы над боссом до записи наград.",
+      "id": 103,
+      "title": "Награды: p99 задержки (1 ч, цель < 30 с)",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 1,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 30
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(raidboss_rewards_delay_seconds_bucket[1h])))",
+          "instant": false,
+          "range": true,
+          "refId": "A",
+          "legendFormat": "__auto"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "id": 104,
+      "title": "Сработавшие алерты",
+      "type": "table",
+      "description": "Ряд ALERTS, который vmalert пишет в VictoriaMetrics. Runbook — в аннотации алерта (http://localhost:8880/vmalert/alerts).",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "fields": ""
+        }
+      },
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "alertstate": true
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "editorMode": "code",
+          "expr": "ALERTS{alertstate=\"firing\"}",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
         "default": true,
         "type": "prometheus",
         "uid": "victoriametrics"
@@ -87,7 +438,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 0
+        "y": 11
       },
       "id": 12,
       "options": {
@@ -185,7 +536,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 0
+        "y": 11
       },
       "id": 11,
       "options": {
@@ -283,7 +634,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 8
+        "y": 19
       },
       "id": 10,
       "options": {
@@ -411,7 +762,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 8
+        "y": 19
       },
       "id": 9,
       "options": {
@@ -522,7 +873,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 16
+        "y": 27
       },
       "id": 8,
       "options": {
@@ -637,7 +988,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 16
+        "y": 27
       },
       "id": 7,
       "options": {
@@ -748,7 +1099,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 24
+        "y": 35
       },
       "id": 13,
       "options": {
@@ -846,7 +1197,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 24
+        "y": 35
       },
       "id": 5,
       "options": {
@@ -944,7 +1295,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 32
+        "y": 43
       },
       "id": 6,
       "options": {
@@ -1042,7 +1393,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 32
+        "y": 43
       },
       "id": 3,
       "options": {
@@ -1140,7 +1491,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 40
+        "y": 51
       },
       "id": 4,
       "options": {
@@ -1238,7 +1589,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 40
+        "y": 51
       },
       "id": 1,
       "options": {
@@ -1336,7 +1687,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 48
+        "y": 59
       },
       "id": 2,
       "options": {
@@ -1387,6 +1738,6 @@
   "timezone": "browser",
   "title": "RaidBoss",
   "uid": "cg28updidrw1sd",
-  "version": 6,
+  "version": 7,
   "weekStart": ""
 }

@@ -1,0 +1,101 @@
+# SLI и SLO (этап 11, B1) и алерты по скорости сжигания бюджета ошибок (B2).
+#
+# Пороги взяты из docs/stage-11-hardening.md (B1) и стартовые: их нужно пересмотреть по замерам.
+# Скорость сжигания (burn rate) — во сколько раз ошибок больше, чем допускает SLO. Два окна на алерт:
+# длинное — что бюджет действительно горит, короткое — что горит прямо сейчас (алерт гаснет сразу
+# после исправления). Быстрое сжигание (14,4 за 1 ч) съедает 2% месячного бюджета за час — будить
+# человека; медленное (6 за 6 ч) — 5% за 6 ч — разобрать в рабочее время.
+#
+# Пороги SLI совпадают с границами корзин гистограмм (telemetry.durationBuckets): 0,05 с, 2 с, 30 с.
+
+groups:
+  - name: raidboss-sli
+    interval: 1m
+    rules:
+      # Attack: доля ответов со сбоем сервиса. RESOURCE_EXHAUSTED (rate limit) — ожидаемое поведение
+      # и в SLI не входит; ошибки клиента (INVALID_ARGUMENT, NOT_FOUND, ...) — тоже не сбой сервиса.
+      # «or vector(0)»: пока сбоев не было, их ряда нет, и без него доля была бы пустой, а не нулём.
+      - record: raidboss:attack_error_ratio:rate5m
+        expr: |
+          (sum(rate(rpc_server_call_duration_seconds_count{rpc_method="raidboss.v1.RaidService/Attack",rpc_response_status_code=~"(?i)unavailable|internal|deadline_exceeded|unknown|data_loss"}[5m])) or vector(0))
+          / sum(rate(rpc_server_call_duration_seconds_count{rpc_method="raidboss.v1.RaidService/Attack",rpc_response_status_code!~"(?i)resource_exhausted"}[5m]))
+      - record: raidboss:attack_error_ratio:rate30m
+        expr: |
+          (sum(rate(rpc_server_call_duration_seconds_count{rpc_method="raidboss.v1.RaidService/Attack",rpc_response_status_code=~"(?i)unavailable|internal|deadline_exceeded|unknown|data_loss"}[30m])) or vector(0))
+          / sum(rate(rpc_server_call_duration_seconds_count{rpc_method="raidboss.v1.RaidService/Attack",rpc_response_status_code!~"(?i)resource_exhausted"}[30m]))
+      - record: raidboss:attack_error_ratio:rate1h
+        expr: |
+          (sum(rate(rpc_server_call_duration_seconds_count{rpc_method="raidboss.v1.RaidService/Attack",rpc_response_status_code=~"(?i)unavailable|internal|deadline_exceeded|unknown|data_loss"}[1h])) or vector(0))
+          / sum(rate(rpc_server_call_duration_seconds_count{rpc_method="raidboss.v1.RaidService/Attack",rpc_response_status_code!~"(?i)resource_exhausted"}[1h]))
+      - record: raidboss:attack_error_ratio:rate6h
+        expr: |
+          (sum(rate(rpc_server_call_duration_seconds_count{rpc_method="raidboss.v1.RaidService/Attack",rpc_response_status_code=~"(?i)unavailable|internal|deadline_exceeded|unknown|data_loss"}[6h])) or vector(0))
+          / sum(rate(rpc_server_call_duration_seconds_count{rpc_method="raidboss.v1.RaidService/Attack",rpc_response_status_code!~"(?i)resource_exhausted"}[6h]))
+
+      # Attack: доля успешных ответов медленнее 50 мс.
+      - record: raidboss:attack_slow_ratio:rate5m
+        expr: |
+          1 - sum(rate(rpc_server_call_duration_seconds_bucket{rpc_method="raidboss.v1.RaidService/Attack",rpc_response_status_code="OK",le="0.05"}[5m]))
+            / sum(rate(rpc_server_call_duration_seconds_count{rpc_method="raidboss.v1.RaidService/Attack",rpc_response_status_code="OK"}[5m]))
+      - record: raidboss:attack_slow_ratio:rate1h
+        expr: |
+          1 - sum(rate(rpc_server_call_duration_seconds_bucket{rpc_method="raidboss.v1.RaidService/Attack",rpc_response_status_code="OK",le="0.05"}[1h]))
+            / sum(rate(rpc_server_call_duration_seconds_count{rpc_method="raidboss.v1.RaidService/Attack",rpc_response_status_code="OK"}[1h]))
+
+      # Удар виден в игре: доля ударов, дошедших от api до Postgres дольше 2 с.
+      - record: raidboss:hit_stale_ratio:rate5m
+        expr: |
+          1 - sum(rate(raidboss_consumer_hit_freshness_seconds_bucket{le="2"}[5m]))
+            / sum(rate(raidboss_consumer_hit_freshness_seconds_count[5m]))
+      - record: raidboss:hit_stale_ratio:rate1h
+        expr: |
+          1 - sum(rate(raidboss_consumer_hit_freshness_seconds_bucket{le="2"}[1h]))
+            / sum(rate(raidboss_consumer_hit_freshness_seconds_count[1h]))
+
+  - name: raidboss-slo
+    interval: 1m
+    rules:
+      # SLO 99,9% ответов Attack без сбоя сервиса: бюджет 0,001.
+      - alert: AttackErrorBudgetFastBurn
+        expr: raidboss:attack_error_ratio:rate1h > 14.4 * 0.001 and raidboss:attack_error_ratio:rate5m > 14.4 * 0.001
+        labels:
+          severity: page
+        annotations:
+          summary: "Attack: сбоев в {{ $value | humanizePercentage }} ответов, бюджет ошибок SLO 99,9% сгорит за 2 дня"
+          runbook_url: docs/runbooks/attack-errors.md
+      - alert: AttackErrorBudgetSlowBurn
+        expr: raidboss:attack_error_ratio:rate6h > 6 * 0.001 and raidboss:attack_error_ratio:rate30m > 6 * 0.001
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Attack: сбоев в {{ $value | humanizePercentage }} ответов за 30 мин, бюджет ошибок SLO 99,9% горит в 6 раз быстрее нормы"
+          runbook_url: docs/runbooks/attack-errors.md
+
+      # SLO 99% ответов Attack быстрее 50 мс: бюджет 0,01.
+      - alert: AttackLatencyBudgetFastBurn
+        expr: raidboss:attack_slow_ratio:rate1h > 14.4 * 0.01 and raidboss:attack_slow_ratio:rate5m > 14.4 * 0.01
+        labels:
+          severity: page
+        annotations:
+          summary: "Attack: {{ $value | humanizePercentage }} ответов медленнее 50 мс при SLO 1%"
+          runbook_url: docs/runbooks/attack-latency.md
+
+      # SLO 99% ударов в Postgres быстрее 2 с: бюджет 0,01.
+      - alert: HitsFreshnessBudgetFastBurn
+        expr: raidboss:hit_stale_ratio:rate1h > 14.4 * 0.01 and raidboss:hit_stale_ratio:rate5m > 14.4 * 0.01
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $value | humanizePercentage }} ударов доходят до Postgres дольше 2 с при SLO 1%"
+          runbook_url: docs/runbooks/consumer-lag.md
+
+      # SLO 99,9% наград быстрее 30 с. Побед мало, и скорость сжигания на таком потоке шумит:
+      # тикет на любую выдачу дольше 30 с за час.
+      - alert: RewardsSlow
+        expr: |
+          sum(increase(raidboss_rewards_delay_seconds_count[1h])) - sum(increase(raidboss_rewards_delay_seconds_bucket{le="30"}[1h])) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Рейдов с наградами позже 30 с после победы за час: {{ $value }}"
+          runbook_url: docs/runbooks/rewards-slow.md

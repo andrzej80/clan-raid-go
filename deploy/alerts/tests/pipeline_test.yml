@@ -1,0 +1,133 @@
+# Тесты алертов конвейера: vmalert-tool unittest (запуск — deploy/alerts/test.sh).
+rule_files:
+  - /rules/raidboss.yml
+evaluation_interval: 1m
+
+tests:
+  - name: партиция стоит дольше 2 мин — page, только эта партиция
+    interval: 1m
+    input_series:
+      - series: 'raidboss_kafka_consumer_retrying_seconds{job="hits-consumer",partition="3"}'
+        values: '0 0 60 120 180 240'
+      - series: 'raidboss_kafka_consumer_retrying_seconds{job="hits-consumer",partition="4"}'
+        values: '0x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ConsumerPartitionStuck
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ConsumerPartitionStuck
+        exp_alerts:
+          - exp_labels: {severity: page, job: hits-consumer, partition: "3"}
+            exp_annotations:
+              summary: "hits-consumer: пачка партиции 3 не применяется уже 3m 0s"
+              runbook_url: docs/runbooks/consumer-partition-stuck.md
+
+  - name: лаг выше 5000 держится 10 мин — page; кратковременный всплеск — нет
+    interval: 1m
+    input_series:
+      - series: 'raidboss_kafka_consumer_lag{job="hits-consumer",partition="0"}'
+        values: '9000x15'
+      - series: 'raidboss_kafka_consumer_lag{job="rewards-worker",partition="0"}'
+        values: '0 9000 9000 0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ConsumerLagHigh
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: ConsumerLagHigh
+        exp_alerts:
+          - exp_labels: {severity: page, job: hits-consumer}
+            exp_annotations:
+              summary: "hits-consumer: отставание 9000 записей держится 10 мин"
+              runbook_url: docs/runbooks/consumer-lag.md
+
+  - name: outbox не разбирается 10 мин — page; несколько relay не складываются
+    interval: 1m
+    input_series:
+      - series: 'raidboss_outbox_unsent{job="outbox-relay",instance="a"}'
+        values: '150x15'
+      - series: 'raidboss_outbox_unsent{job="outbox-relay",instance="b"}'
+        values: '150x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: OutboxBacklog
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "В outbox 150 неотправленных записей уже 10 мин"
+              runbook_url: docs/runbooks/outbox-backlog.md
+
+  - name: outbox на 60 записей (двое relay по 60 — не 120) — молчит
+    interval: 1m
+    input_series:
+      - series: 'raidboss_outbox_unsent{job="outbox-relay",instance="a"}'
+        values: '60x15'
+      - series: 'raidboss_outbox_unsent{job="outbox-relay",instance="b"}'
+        values: '60x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: OutboxBacklog
+        exp_alerts: []
+
+  - name: новые записи в DLQ — ticket с причиной
+    interval: 1m
+    input_series:
+      - series: 'raidboss_kafka_consume_dlq_total{job="hits-consumer",reason="permanent"}'
+        values: '0 0 0 2 2 2'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: DeadLetterRecords
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: DeadLetterRecords
+        exp_alerts:
+          - exp_labels: {severity: ticket, job: hits-consumer, reason: permanent}
+            exp_annotations:
+              summary: "hits-consumer: записей в DLQ за 15 мин — 2 (причина permanent)"
+              runbook_url: docs/runbooks/dlq.md
+
+  - name: hits-consumer перестал присылать метрики — page только для него
+    interval: 1m
+    input_series:
+      - series: 'go_goroutine_count{job="api"}'
+        values: '10x10'
+      - series: 'go_goroutine_count{job="hits-consumer"}'
+        values: '10 10 _x8'
+      - series: 'go_goroutine_count{job="outbox-relay"}'
+        values: '10x10'
+      - series: 'go_goroutine_count{job="rewards-worker"}'
+        values: '10x10'
+      - series: 'go_goroutine_count{job="scheduler"}'
+        values: '10x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ServiceNotReporting
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: ServiceNotReporting
+        exp_alerts:
+          - exp_labels: {severity: page, job: hits-consumer}
+            exp_annotations:
+              summary: "hits-consumer не присылает метрики 3 мин"
+              runbook_url: docs/runbooks/service-not-reporting.md
+
+  - name: пул Postgres занят больше 80% 10 мин — ticket
+    interval: 1m
+    input_series:
+      - series: 'pgxpool_acquired_connections{job="hits-consumer"}'
+        values: '15x15'
+      - series: 'pgxpool_max_connections{job="hits-consumer"}'
+        values: '16x15'
+      - series: 'pgxpool_acquired_connections{job="api"}'
+        values: '2x15'
+      - series: 'pgxpool_max_connections{job="api"}'
+        values: '5x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: PgPoolSaturated
+        exp_alerts:
+          - exp_labels: {severity: ticket, job: hits-consumer}
+            exp_annotations:
+              summary: "hits-consumer: пул Postgres занят на 93.75% 10 мин"
+              runbook_url: docs/runbooks/pg-pool-saturated.md

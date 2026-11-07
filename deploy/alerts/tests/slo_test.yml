@@ -1,0 +1,79 @@
+# Тесты SLI и SLO-алертов: vmalert-tool unittest (запуск — deploy/alerts/test.sh).
+rule_files:
+  - /rules/slo.yml
+evaluation_interval: 1m
+
+tests:
+  - name: Attack — 1 из 11 ответов UNAVAILABLE, бюджет 99,9% горит — page
+    interval: 1m
+    input_series:
+      - series: 'rpc_server_call_duration_seconds_count{rpc_method="raidboss.v1.RaidService/Attack",rpc_response_status_code="OK"}'
+        values: '0+1000x20'
+      - series: 'rpc_server_call_duration_seconds_count{rpc_method="raidboss.v1.RaidService/Attack",rpc_response_status_code="UNAVAILABLE"}'
+        values: '0+100x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: AttackErrorBudgetFastBurn
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "Attack: сбоев в 9.091% ответов, бюджет ошибок SLO 99,9% сгорит за 2 дня"
+              runbook_url: docs/runbooks/attack-errors.md
+
+  - name: Attack — много RESOURCE_EXHAUSTED (rate limit) не сбой сервиса
+    interval: 1m
+    input_series:
+      - series: 'rpc_server_call_duration_seconds_count{rpc_method="raidboss.v1.RaidService/Attack",rpc_response_status_code="OK"}'
+        values: '0+1000x20'
+      - series: 'rpc_server_call_duration_seconds_count{rpc_method="raidboss.v1.RaidService/Attack",rpc_response_status_code="RESOURCE_EXHAUSTED"}'
+        values: '0+5000x20'
+      - series: 'rpc_server_call_duration_seconds_count{rpc_method="raidboss.v1.RaidService/Attack",rpc_response_status_code="NOT_FOUND"}'
+        values: '0+500x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: AttackErrorBudgetFastBurn
+        exp_alerts: []
+
+  - name: удары — 20% доходят до Postgres дольше 2 с — page
+    interval: 1m
+    input_series:
+      - series: 'raidboss_consumer_hit_freshness_seconds_bucket{le="2"}'
+        values: '0+80x20'
+      - series: 'raidboss_consumer_hit_freshness_seconds_count'
+        values: '0+100x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: HitsFreshnessBudgetFastBurn
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "20% ударов доходят до Postgres дольше 2 с при SLO 1%"
+              runbook_url: docs/runbooks/consumer-lag.md
+
+  - name: награды — один рейд из трёх получил награды позже 30 с — ticket
+    interval: 1m
+    input_series:
+      - series: 'raidboss_rewards_delay_seconds_bucket{le="30"}'
+        values: '0 1 1 2 2 2'
+      - series: 'raidboss_rewards_delay_seconds_count'
+        values: '0 1 2 3 3 3'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RewardsSlow
+        exp_alerts:
+          - exp_labels: {severity: ticket}
+            exp_annotations:
+              summary: "Рейдов с наградами позже 30 с после победы за час: 1"
+              runbook_url: docs/runbooks/rewards-slow.md
+
+  - name: Attack без единого сбоя — доля ошибок 0, а не пустой ряд
+    interval: 1m
+    input_series:
+      - series: 'rpc_server_call_duration_seconds_count{rpc_method="raidboss.v1.RaidService/Attack",rpc_response_status_code="OK"}'
+        values: '0+1000x10'
+    metricsql_expr_test:
+      - expr: raidboss:attack_error_ratio:rate5m
+        eval_time: 10m
+        exp_samples:
+          - labels: 'raidboss:attack_error_ratio:rate5m'
+            value: 0

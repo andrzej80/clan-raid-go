@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -29,6 +30,8 @@ type RejectedEvent struct {
 type RaidOutcome struct {
 	Status         RaidStatus
 	KillerPlayerID *int64
+	// FinishedAt — когда рейд завершился; nil, пока он active.
+	FinishedAt *time.Time
 }
 
 // RewardsRepository — операции над наградами; вызываются внутри транзакции TxManager.

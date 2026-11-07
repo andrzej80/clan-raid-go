@@ -1,0 +1,131 @@
+# Эксплуатационные алерты (этап 11, B2). severity=page будит человека, severity=ticket разбирается
+# в рабочее время. У каждого алерта — runbook (docs/runbooks/) с диагностикой и действиями.
+#
+# Метки job — это OTEL_SERVICE_NAME сервиса (коллектор кладёт его в job при remote write).
+
+groups:
+  - name: raidboss-pipeline
+    interval: 1m
+    rules:
+      # Пачка партиции не применяется дольше 2 мин: партиция стоит (A1 изолирует её от остальных,
+      # A2 решает, когда убрать виновную запись в DLQ). Временный сбой БД тоже сюда попадает.
+      - alert: ConsumerPartitionStuck
+        expr: max by (job, partition) (raidboss_kafka_consumer_retrying_seconds) > 120
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.job }}: пачка партиции {{ $labels.partition }} не применяется уже {{ $value | humanizeDuration }}"
+          runbook_url: docs/runbooks/consumer-partition-stuck.md
+
+      # Консьюмер не успевает: отставание 10 минут подряд выше 5000 записей (~15 с потока при 300 RPS).
+      - alert: ConsumerLagHigh
+        expr: sum by (job) (raidboss_kafka_consumer_lag) > 5000
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.job }}: отставание {{ $value }} записей держится 10 мин"
+          runbook_url: docs/runbooks/consumer-lag.md
+
+      # Outbox не разбирается: события побед и награды не уходят в Kafka. Значение отдаёт каждый
+      # экземпляр relay (запрос к общей таблице), поэтому max, а не sum.
+      - alert: OutboxBacklog
+        expr: max(raidboss_outbox_unsent) > 100
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "В outbox {{ $value }} неотправленных записей уже 10 мин"
+          runbook_url: docs/runbooks/outbox-backlog.md
+
+      - alert: KafkaPartitionPausedLong
+        expr: max by (job, partition) (raidboss_kafka_consumer_paused) == 1
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.job }}: чтение партиции {{ $labels.partition }} на паузе 10 мин — горутина партиции не успевает"
+          runbook_url: docs/runbooks/consumer-partition-stuck.md
+
+      - alert: DeadLetterRecords
+        expr: sum by (job, reason) (increase(raidboss_kafka_consume_dlq_total[15m])) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.job }}: записей в DLQ за 15 мин — {{ $value }} (причина {{ $labels.reason }})"
+          runbook_url: docs/runbooks/dlq.md
+
+      # Redis расходится с Postgres: лидерборд и HP на экране неверны, пока не запущен rebuild-cache.
+      - alert: RedisBoardWriteErrors
+        expr: sum(increase(raidboss_consumer_board_errors_total[15m])) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "За 15 мин {{ $value }} неудачных записей в Redis: лидерборд расходится с Postgres"
+          runbook_url: docs/runbooks/redis-divergence.md
+
+      - alert: SchedulerErrors
+        expr: sum(increase(raidboss_scheduler_errors_total[10m])) > 3
+        labels:
+          severity: ticket
+        annotations:
+          summary: "scheduler: {{ $value }} ошибок за 10 мин — рейды могут не истекать вовремя"
+          runbook_url: docs/runbooks/raids-not-expiring.md
+
+  - name: raidboss-resources
+    interval: 1m
+    rules:
+      - alert: PgPoolSaturated
+        expr: sum by (job) (pgxpool_acquired_connections) / sum by (job) (pgxpool_max_connections) > 0.8
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.job }}: пул Postgres занят на {{ $value | humanizePercentage }} 10 мин"
+          runbook_url: docs/runbooks/pg-pool-saturated.md
+
+  # Сервис не присылает телеметрию: процесс лежит, не может стартовать или потерял связь с
+  # коллектором. go_goroutine_count отдаёт каждый сервис раз в интервал экспорта (10 с).
+  - name: raidboss-services
+    interval: 1m
+    rules:
+      - alert: ServiceNotReporting
+        expr: absent_over_time(go_goroutine_count{job="api"}[3m])
+        labels:
+          severity: page
+          job: api
+        annotations:
+          summary: "api не присылает метрики 3 мин"
+          runbook_url: docs/runbooks/service-not-reporting.md
+      - alert: ServiceNotReporting
+        expr: absent_over_time(go_goroutine_count{job="hits-consumer"}[3m])
+        labels:
+          severity: page
+          job: hits-consumer
+        annotations:
+          summary: "hits-consumer не присылает метрики 3 мин"
+          runbook_url: docs/runbooks/service-not-reporting.md
+      - alert: ServiceNotReporting
+        expr: absent_over_time(go_goroutine_count{job="outbox-relay"}[3m])
+        labels:
+          severity: page
+          job: outbox-relay
+        annotations:
+          summary: "outbox-relay не присылает метрики 3 мин"
+          runbook_url: docs/runbooks/service-not-reporting.md
+      - alert: ServiceNotReporting
+        expr: absent_over_time(go_goroutine_count{job="rewards-worker"}[3m])
+        labels:
+          severity: page
+          job: rewards-worker
+        annotations:
+          summary: "rewards-worker не присылает метрики 3 мин"
+          runbook_url: docs/runbooks/service-not-reporting.md
+      - alert: ServiceNotReporting
+        expr: absent_over_time(go_goroutine_count{job="scheduler"}[3m])
+        labels:
+          severity: ticket
+          job: scheduler
+        annotations:
+          summary: "scheduler не присылает метрики 3 мин"
+          runbook_url: docs/runbooks/service-not-reporting.md

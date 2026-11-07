@@ -315,7 +315,8 @@ type partitionWorker struct {
 	inbox   []*kgo.Record
 	paused  bool
 
-	// retryingSince — UnixNano первого сбоя текущей пачки, 0 — пачка не в повторах (для метрики).
+	// retryingSince — UnixNano начала первой попытки текущей пачки, если она уже хоть раз не прошла;
+	// 0 — пачка не в повторах (для метрики).
 	retryingSince atomic.Int64
 
 	// Для метрики лага. Оба значения — "следующий offset"; -1 — ещё неизвестно.
@@ -469,13 +470,16 @@ func (w *partitionWorker) handleWithRetry(ctx context.Context, records []*kgo.Re
 	defer w.retryingSince.Store(0)
 	backoff := retryBackoffMin
 	budgetFrom := time.Now()
+	// Отсчёт «партиция стоит» — от начала первой попытки, а не от её неудачи: попытка, которая
+	// ждёт блокировку, обрывается только по attemptTimeout (30 с), и алерт запаздывал бы на них.
+	batchStart := budgetFrom.UnixNano()
 	for {
 		w.consumer.cfg.Heartbeat.Beat()
 		dead, err := w.handleAttempt(ctx, records)
 		if err == nil {
 			return dead, true
 		}
-		w.retryingSince.CompareAndSwap(0, time.Now().UnixNano())
+		w.retryingSince.CompareAndSwap(0, batchStart)
 		class := w.consumer.classify(err)
 		w.consumer.metrics.batchRetries.Add(ctx, 1, metric.WithAttributes(attribute.String("class", class.String())))
 		slog.Error("handle batch, will retry", "topic", w.tp.topic, "partition", w.tp.partition,

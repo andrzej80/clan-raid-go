@@ -650,3 +650,40 @@ func TestConsumer_TransientErrorIsRetriedPastBudget(t *testing.T) {
 	proc.setSystemic(nil)
 	eventually(t, "all hits applied after the database is back", func() bool { return len(proc.processed()) == len(hits) })
 }
+
+// hangingProcessor не отвечает, пока не истечёт контекст попытки (строка рейда заблокирована).
+type hangingProcessor struct{ calls atomic.Int32 }
+
+func (p *hangingProcessor) ProcessBatch(ctx context.Context, _ []domain.Hit) (domain.BatchResult, error) {
+	p.calls.Add(1)
+	<-ctx.Done()
+	return domain.BatchResult{}, ctx.Err()
+}
+
+// Время «партиция стоит» считается от начала первой попытки пачки: попытка, ждущая блокировку,
+// обрывается только по таймауту, и отсчёт от её неудачи занижал бы время простоя на этот таймаут.
+func TestConsumer_RetryingSinceCountsFromFirstAttempt(t *testing.T) {
+	t.Parallel()
+
+	brokers := startConsumerCluster(t)
+	publishHits(t, brokers, newHit(uuid.New()))
+	proc := &hangingProcessor{}
+	c := newConsumer(t, brokers, proc)
+	c.attemptTimeout = 300 * time.Millisecond
+	startConsumer(t, c)
+
+	stuckFor := func() time.Duration {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		for _, w := range c.partitions {
+			if from := w.retryingSince.Load(); from != 0 {
+				return time.Since(time.Unix(0, from))
+			}
+		}
+		return 0
+	}
+	eventually(t, "first attempt timed out", func() bool { return proc.calls.Load() >= 1 && stuckFor() > 0 })
+	if got := stuckFor(); got < 300*time.Millisecond {
+		t.Fatalf("stuck for %v right after the first timeout, want at least the attempt timeout (300ms)", got)
+	}
+}
