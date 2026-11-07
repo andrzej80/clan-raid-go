@@ -119,7 +119,9 @@ migrate_seed() {
 # start_services <сервис>...: собирает и запускает сервисы приложения, ждёт порт api.
 start_services() {
   step "start: $*"
-  $DC up -d --build --no-deps "$@"
+  # --force-recreate: если infra_up пересоздал Kafka (сменились её настройки), топики созданы заново
+  # с новыми ID, а клиент franz-go в уже запущенном сервисе пересозданный топик сам не подхватывает.
+  $DC up -d --build --no-deps --force-recreate "$@"
   wait_port "$APP_PORT"
 }
 

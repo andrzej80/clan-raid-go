@@ -24,7 +24,8 @@ VICTIM=${VICTIM:-kafka-2}
 # и сравнение с raid_hits ничего не доказывает.
 DUP_PROB=0
 
-COMPOSE_EXTRA="-f deploy/docker-compose.kafka-ha.yml"
+# CHAOS_COMPOSE_EXTRA — ещё compose-файлы поверх кластера из трёх брокеров (например, настройки брокеров).
+COMPOSE_EXTRA="-f deploy/docker-compose.kafka-ha.yml ${CHAOS_COMPOSE_EXTRA:-}"
 KAFKA_BROKERS_EXTRA="kafka-2 kafka-3"
 
 # shellcheck source=loadtest/lib.sh
@@ -46,7 +47,8 @@ step "topics: replication factor and min.insync.replicas"
   echo "topics differ from the spec: was the cluster started without the HA overlay? run 'down' first" >&2
   exit 1
 }
-docker exec kafka $KAFKA_BIN/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic raid.hits | head -n 3
+# sed, а не head: head закрывает канал раньше, чем docker exec допишет, и pipefail роняет скрипт.
+docker exec kafka $KAFKA_BIN/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic raid.hits | sed -n '1,3p'
 migrate_seed "$CLANS" "$PLAYERS"
 start_services api hits-consumer rewards-worker scheduler outbox-relay
 
