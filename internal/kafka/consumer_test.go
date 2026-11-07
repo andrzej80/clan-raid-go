@@ -3,13 +3,16 @@ package kafka
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -454,4 +457,196 @@ func TestConsumer_StuckPartitionDoesNotBlockOthers(t *testing.T) {
 		}
 	}
 	eventually(t, "partition of raid A resumed", func() bool { return c.pausedPartitions() == 0 })
+}
+
+var (
+	errBadData  = errors.New("check constraint violated") // постоянная
+	errBadSQL   = errors.New("column does not exist")     // неизвестная
+	errDBIsDown = errors.New("connection refused")        // временная
+)
+
+func testClassify(err error) domain.ErrorClass {
+	switch {
+	case errors.Is(err, errBadData):
+		return domain.ErrorPermanent
+	case errors.Is(err, errDBIsDown):
+		return domain.ErrorTransient
+	default:
+		return domain.ErrorUnknown
+	}
+}
+
+// poisonProcessor падает на пачке, в которой есть удар из poison (с ошибкой из карты), а пока
+// systemic не пуст — на любой пачке. Удачная пачка записывается целиком, повтор не дублирует.
+type poisonProcessor struct {
+	mu       sync.Mutex
+	poison   map[uuid.UUID]error
+	systemic error
+	done     map[uuid.UUID]bool
+	order    []uuid.UUID
+}
+
+func (p *poisonProcessor) ProcessBatch(_ context.Context, hits []domain.Hit) (domain.BatchResult, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.systemic != nil {
+		return domain.BatchResult{}, fmt.Errorf("raid: %w", p.systemic)
+	}
+	for _, h := range hits {
+		if err, ok := p.poison[h.ID]; ok {
+			return domain.BatchResult{}, fmt.Errorf("raid %s: insert hits: %w", h.RaidID, err)
+		}
+	}
+	for _, h := range hits {
+		if !p.done[h.ID] {
+			p.done[h.ID] = true
+			p.order = append(p.order, h.ID)
+		}
+	}
+	return domain.BatchResult{}, nil
+}
+
+func (p *poisonProcessor) processed() []uuid.UUID {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.order)
+}
+
+func (p *poisonProcessor) setSystemic(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.systemic = err
+}
+
+// dlqSize — сколько записей в DLQ-топике.
+func dlqSize(t *testing.T, brokers []string) int64 {
+	t.Helper()
+	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	defer cl.Close()
+	ends, err := kadm.NewClient(cl).ListEndOffsets(context.Background(), testDLQTopic)
+	if err != nil {
+		t.Fatalf("end offsets: %v", err)
+	}
+	var n int64
+	ends.Each(func(o kadm.ListedOffset) { n += o.Offset })
+	return n
+}
+
+// startPoisonConsumer публикует удары одного рейда (одна партиция, одна пачка) и запускает консьюмер.
+func startPoisonConsumer(t *testing.T, proc *poisonProcessor, budget time.Duration, hits []domain.Hit) []string {
+	t.Helper()
+	brokers := startConsumerCluster(t)
+	publishHits(t, brokers, hits...)
+	c, err := NewConsumer(ConsumerConfig{
+		Brokers: brokers, Topic: testTopic, DLQTopic: testDLQTopic, Group: "test-group",
+		BatchSize: 100, BatchTimeout: 100 * time.Millisecond,
+		Classify: testClassify, RetryBudget: budget,
+	}, proc)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	startConsumer(t, c)
+	return brokers
+}
+
+func raidHits(n int) []domain.Hit {
+	raid := uuid.New()
+	hits := make([]domain.Hit, n)
+	for i := range hits {
+		hits[i] = newHit(raid)
+	}
+	return hits
+}
+
+func ids(hits []domain.Hit) []uuid.UUID {
+	out := make([]uuid.UUID, len(hits))
+	for i, h := range hits {
+		out[i] = h.ID
+	}
+	return out
+}
+
+// Постоянная ошибка: пачка делится сразу, в DLQ уходят только виновные записи, остальные
+// применены по порядку.
+func TestConsumer_PermanentErrorSendsOnlyCulpritsToDLQ(t *testing.T) {
+	t.Parallel()
+
+	hits := raidHits(10)
+	bad := map[uuid.UUID]error{hits[2].ID: errBadData, hits[6].ID: errBadData}
+	proc := &poisonProcessor{poison: bad, done: map[uuid.UUID]bool{}}
+	brokers := startPoisonConsumer(t, proc, time.Hour, hits)
+
+	dlq := readDLQ(t, brokers, 2)
+	if len(dlq) != 2 {
+		t.Fatalf("dlq = %d records, want the 2 poisoned", len(dlq))
+	}
+	for _, rec := range dlq {
+		got, err := decodeHit(rec.Value)
+		if _, poisoned := bad[got.ID]; err != nil || !poisoned {
+			t.Fatalf("dlq record is hit %v (err %v), want one of the poisoned", got.ID, err)
+		}
+		if reason := header(rec, headerDLQReason); !strings.HasPrefix(reason, dlqReasonPermanent) {
+			t.Fatalf("dlq reason %q, want %q", reason, dlqReasonPermanent)
+		}
+	}
+	want := slices.DeleteFunc(ids(hits), func(id uuid.UUID) bool { _, poisoned := bad[id]; return poisoned })
+	eventually(t, "the other 8 hits applied", func() bool { return len(proc.processed()) == len(want) })
+	if !slices.Equal(proc.processed(), want) {
+		t.Fatalf("applied %v, want %v in order", proc.processed(), want)
+	}
+}
+
+// Неизвестная ошибка: пока не исчерпан бюджет, пачка только повторяется; потом виновная запись
+// находится делением и уходит в DLQ с причиной retry_budget.
+func TestConsumer_UnknownErrorUsesRetryBudget(t *testing.T) {
+	t.Parallel()
+
+	hits := raidHits(8)
+	proc := &poisonProcessor{poison: map[uuid.UUID]error{hits[2].ID: errBadSQL}, done: map[uuid.UUID]bool{}}
+	brokers := startPoisonConsumer(t, proc, 300*time.Millisecond, hits)
+
+	dlq := readDLQ(t, brokers, 1)
+	if len(dlq) != 1 || !strings.HasPrefix(header(dlq[0], headerDLQReason), dlqReasonRetryBudget) {
+		t.Fatalf("dlq = %d records; want 1 with reason %q", len(dlq), dlqReasonRetryBudget)
+	}
+	eventually(t, "the other 7 hits applied", func() bool { return len(proc.processed()) == 7 })
+}
+
+// Неизвестная ошибка на каждой записи — сбой не в данных: после бюджета в DLQ ничего не уходит,
+// пачка повторяется, а когда причина ушла, применяется целиком.
+func TestConsumer_SystemicErrorNeverEmptiesStreamIntoDLQ(t *testing.T) {
+	t.Parallel()
+
+	hits := raidHits(6)
+	proc := &poisonProcessor{systemic: errBadSQL, done: map[uuid.UUID]bool{}}
+	brokers := startPoisonConsumer(t, proc, 100*time.Millisecond, hits)
+
+	<-time.After(time.Second) // несколько бюджетов и делений
+	if n := dlqSize(t, brokers); n != 0 {
+		t.Fatalf("dlq has %d records: a systemic failure must not empty the stream into DLQ", n)
+	}
+	proc.setSystemic(nil) // выкатили исправление
+	eventually(t, "all hits applied after the fix", func() bool { return len(proc.processed()) == len(hits) })
+	if n := dlqSize(t, brokers); n != 0 {
+		t.Fatalf("dlq has %d records after recovery", n)
+	}
+}
+
+// Временная ошибка повторяется бесконечно, бюджет на неё не действует.
+func TestConsumer_TransientErrorIsRetriedPastBudget(t *testing.T) {
+	t.Parallel()
+
+	hits := raidHits(4)
+	proc := &poisonProcessor{systemic: errDBIsDown, done: map[uuid.UUID]bool{}}
+	brokers := startPoisonConsumer(t, proc, 50*time.Millisecond, hits)
+
+	<-time.After(700 * time.Millisecond)
+	if n := dlqSize(t, brokers); n != 0 {
+		t.Fatalf("dlq has %d records: transient errors must never go to DLQ", n)
+	}
+	proc.setSystemic(nil)
+	eventually(t, "all hits applied after the database is back", func() bool { return len(proc.processed()) == len(hits) })
 }

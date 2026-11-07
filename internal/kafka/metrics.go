@@ -112,6 +112,12 @@ func registerLagGauge(mp metric.MeterProvider, c *Consumer) (metric.Registration
 	if err != nil {
 		return nil, fmt.Errorf("create lag gauge: %w", err)
 	}
+	retrying, err := meter.Float64ObservableGauge("raidboss.kafka.consumer.retrying",
+		metric.WithDescription("How long the current batch of the partition has been failing and retried; 0 when it is not"),
+		metric.WithUnit("s"))
+	if err != nil {
+		return nil, fmt.Errorf("create retrying gauge: %w", err)
+	}
 	paused, err := meter.Int64ObservableGauge("raidboss.kafka.consumer.paused",
 		metric.WithDescription("1 while fetching of the partition is paused because its worker is behind"),
 		metric.WithUnit("{partition}"))
@@ -133,9 +139,14 @@ func registerLagGauge(mp metric.MeterProvider, c *Consumer) (metric.Registration
 				p = 1
 			}
 			o.ObserveInt64(paused, p, attrs)
+			var since float64
+			if from := w.retryingSince.Load(); from != 0 {
+				since = time.Since(time.Unix(0, from)).Seconds()
+			}
+			o.ObserveFloat64(retrying, since, attrs)
 		}
 		return nil
-	}, lag, paused)
+	}, lag, paused, retrying)
 	if err != nil {
 		return nil, fmt.Errorf("register lag gauge: %w", err)
 	}

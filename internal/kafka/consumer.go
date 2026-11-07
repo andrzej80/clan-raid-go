@@ -65,6 +65,33 @@ type ConsumerConfig struct {
 	// pollTimeout), каждая пачка и каждая попытка повтора, поэтому долгий повтор при недоступной
 	// БД не выглядит зависанием.
 	Heartbeat *health.Heartbeat
+	// Classify решает, поможет ли повтор пачки (pg.ClassifyError); nil — отмена и дедлайн считаются
+	// временными, всё остальное неизвестным.
+	Classify func(error) domain.ErrorClass
+	// RetryBudget — сколько повторять пачку с неизвестной ошибкой, прежде чем искать виновную запись;
+	// 0 — DefaultRetryBudget.
+	RetryBudget time.Duration
+}
+
+// DefaultRetryBudget — бюджет повторов для неизвестной ошибки. За 10 минут проходят кратковременные
+// сбои и перезапуски зависимостей, а одна битая запись не держит партицию часами.
+const DefaultRetryBudget = 10 * time.Minute
+
+// Причины отправки в DLQ после повторов (метка reason у счётчика).
+const (
+	dlqReasonPermanent   = "permanent"    // запись нарушает ограничения или формат данных
+	dlqReasonRetryBudget = "retry_budget" // неизвестная ошибка дольше RetryBudget, запись падает и поодиночке
+)
+
+// classify — ConsumerConfig.Classify или класс по умолчанию.
+func (c *Consumer) classify(err error) domain.ErrorClass {
+	if c.cfg.Classify != nil {
+		return c.cfg.Classify(err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return domain.ErrorTransient
+	}
+	return domain.ErrorUnknown
 }
 
 // pollTimeout ограничивает одно ожидание PollFetches: без записей в топике цикл опроса иначе
@@ -121,6 +148,9 @@ func NewBatchConsumer(cfg ConsumerConfig, handler BatchHandler, extra ...kgo.Opt
 		return nil, errors.New("kafka: topic, dlq topic and group are required")
 	case cfg.BatchSize < 1 || cfg.BatchTimeout <= 0:
 		return nil, errors.New("kafka: batch size and timeout must be positive")
+	}
+	if cfg.RetryBudget <= 0 {
+		cfg.RetryBudget = DefaultRetryBudget
 	}
 	metrics, err := newConsumerMetrics(cfg.MeterProvider)
 	if err != nil {
@@ -285,6 +315,9 @@ type partitionWorker struct {
 	inbox   []*kgo.Record
 	paused  bool
 
+	// retryingSince — UnixNano первого сбоя текущей пачки, 0 — пачка не в повторах (для метрики).
+	retryingSince atomic.Int64
+
 	// Для метрики лага. Оба значения — "следующий offset"; -1 — ещё неизвестно.
 	highWatermark atomic.Int64 // конец партиции по последнему ответу брокера
 	processed     atomic.Int64 // offset, с которого начнётся необработанное
@@ -420,24 +453,105 @@ func (w *partitionWorker) handleBatch(ctx context.Context, records []*kgo.Record
 	return true
 }
 
-// handleWithRetry повторяет пачку с экспоненциальной паузой, пока обработчик не справится.
+// handleWithRetry повторяет пачку с экспоненциальной паузой, пока обработчик не справится, и
+// решает по классу ошибки (ConsumerConfig.Classify), когда искать виновную запись:
+//
+//   - временная (сеть, таймаут, deadlock) — повторять бесконечно: в DLQ при лежащей БД ушёл бы
+//     весь поток;
+//   - постоянная (данные нарушают ограничения) — сразу делить пачку пополам и убрать в DLQ
+//     записи, которые не проходят и поодиночке;
+//   - неизвестная — повторять в пределах RetryBudget, затем делить. Если поодиночке не проходит
+//     ни одна запись, сбой не в данных (неудачный релиз, нет миграции): в DLQ ничего не уходит,
+//     повторы продолжаются, а следующее деление — через ещё один бюджет.
+//
 // Остановка (отмена контекста или отзыв партиции) прерывает повторы.
 func (w *partitionWorker) handleWithRetry(ctx context.Context, records []*kgo.Record) ([]DLQRecord, bool) {
+	defer w.retryingSince.Store(0)
 	backoff := retryBackoffMin
+	budgetFrom := time.Now()
 	for {
 		w.consumer.cfg.Heartbeat.Beat()
 		dead, err := w.handleAttempt(ctx, records)
 		if err == nil {
 			return dead, true
 		}
-		w.consumer.metrics.batchRetries.Add(ctx, 1)
-		slog.Error("handle batch, will retry",
-			"topic", w.tp.topic, "partition", w.tp.partition, "records", len(records), "err", err)
+		w.retryingSince.CompareAndSwap(0, time.Now().UnixNano())
+		class := w.consumer.classify(err)
+		w.consumer.metrics.batchRetries.Add(ctx, 1, metric.WithAttributes(attribute.String("class", class.String())))
+		slog.Error("handle batch, will retry", "topic", w.tp.topic, "partition", w.tp.partition,
+			"records", len(records), "class", class.String(), "err", err)
+
+		switch {
+		case class == domain.ErrorPermanent:
+			if dead, ok := w.isolate(ctx, records, dlqReasonPermanent, false); ok {
+				return dead, true
+			}
+		case class == domain.ErrorUnknown && time.Since(budgetFrom) >= w.consumer.cfg.RetryBudget:
+			if dead, ok := w.isolate(ctx, records, dlqReasonRetryBudget, true); ok {
+				return dead, true
+			}
+			budgetFrom = time.Now()
+		}
 		if !w.wait(ctx, backoff) {
 			return nil, false
 		}
 		backoff = min(backoff*2, retryBackoffMax)
 	}
+}
+
+// isolate делит пачку пополам, пока не найдёт записи, которые не проходят поодиночке, и
+// возвращает их для DLQ вместе с остальными «мёртвыми» записями обработчика. Части обрабатываются
+// по порядку, слева направо: порядок применения ударов одного рейда не меняется. Успешные части
+// уже записаны, повтор всей пачки после неудачи безопасен (дубли отсекаются по hit_id).
+//
+// false — виновные не найдены: одиночная запись упала с временной ошибкой, или (systemicIfAll)
+// поодиночке не прошла ни одна запись, то есть дело не в данных.
+func (w *partitionWorker) isolate(
+	ctx context.Context, records []*kgo.Record, reason string, systemicIfAll bool,
+) ([]DLQRecord, bool) {
+	dead, culprits, err := w.bisect(ctx, records, reason)
+	if err != nil {
+		slog.Warn("isolate failing records: stopped by a transient error, the batch will be retried",
+			"topic", w.tp.topic, "partition", w.tp.partition, "err", err)
+		return nil, false
+	}
+	if systemicIfAll && culprits == len(records) {
+		slog.Error("every record of the batch fails on its own: the failure is not in the data, nothing goes to DLQ",
+			"topic", w.tp.topic, "partition", w.tp.partition, "records", len(records))
+		return nil, false
+	}
+	slog.Warn("failing records isolated, sending to DLQ", "topic", w.tp.topic, "partition", w.tp.partition,
+		"records", len(records), "culprits", culprits, "reason", reason)
+	return dead, true
+}
+
+// bisect обрабатывает records, при ошибке — каждую половину отдельно. culprits — сколько записей
+// не прошли поодиночке (они в dead с причиной reason). Ошибка — одиночная запись упала с временной
+// ошибкой: искать дальше нет смысла, пачку нужно повторить целиком.
+func (w *partitionWorker) bisect(
+	ctx context.Context, records []*kgo.Record, reason string,
+) (dead []DLQRecord, culprits int, _ error) {
+	w.consumer.cfg.Heartbeat.Beat()
+	dead, err := w.handleAttempt(ctx, records)
+	if err == nil {
+		return dead, 0, nil
+	}
+	if len(records) == 1 {
+		if w.consumer.classify(err) == domain.ErrorTransient {
+			return nil, 0, err
+		}
+		return []DLQRecord{{Record: records[0], Reason: reason, Details: err.Error()}}, 1, nil
+	}
+	mid := len(records) / 2
+	left, lc, err := w.bisect(ctx, records[:mid], reason)
+	if err != nil {
+		return nil, 0, err
+	}
+	right, rc, err := w.bisect(ctx, records[mid:], reason)
+	if err != nil {
+		return nil, 0, err
+	}
+	return append(left, right...), lc + rc, nil
 }
 
 // handleAttempt — одна попытка обработать пачку, ограниченная attemptTimeout. Без ограничения

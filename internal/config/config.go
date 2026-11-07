@@ -83,6 +83,9 @@ type KafkaConfig struct {
 	ConsumerGroup string
 	BatchSize     int
 	BatchTimeout  time.Duration
+	// RetryBudget — сколько консьюмер повторяет пачку с неизвестной ошибкой, прежде чем искать
+	// виновную запись (CONSUMER_RETRY_BUDGET); 0 — значение консьюмера по умолчанию (10 мин).
+	RetryBudget time.Duration
 	// ReplicationFactor — фактор репликации топиков (KAFKA_REPLICATION_FACTOR, по умолчанию 1).
 	// Нужен только raidctl topics: сервисы топики не создают.
 	ReplicationFactor int16
@@ -266,6 +269,7 @@ func loadKafka() KafkaConfig {
 		ConsumerGroup: defaultHitsGroup,
 		BatchSize:     int(getEnvInt("CONSUMER_BATCH_SIZE", defaultBatchSize)),
 		BatchTimeout:  getEnvDuration("CONSUMER_BATCH_TIMEOUT", defaultBatchTimeout),
+		RetryBudget:   max(getEnvDuration("CONSUMER_RETRY_BUDGET", 0), 0),
 
 		EventsDLQTopic: defaultEventsDLQTopic,
 		RewardsTopic:   defaultRewardsTopic,

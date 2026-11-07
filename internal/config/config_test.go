@@ -439,3 +439,23 @@ func TestLoadKafkaReplicationFactor(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadKafkaRetryBudget(t *testing.T) {
+	tests := []struct {
+		env  string
+		want time.Duration
+	}{
+		{"", 0},
+		{"30s", 30 * time.Second},
+		{"-1s", 0},
+		{"bad", 0},
+	}
+	for _, tc := range tests {
+		t.Run("env="+tc.env, func(t *testing.T) {
+			t.Setenv("CONSUMER_RETRY_BUDGET", tc.env)
+			if got := LoadKafka().RetryBudget; got != tc.want {
+				t.Fatalf("RetryBudget = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -49,6 +49,8 @@ func run(ctx context.Context, cfg *config.Config) error {
 		BatchSize:    cfg.Kafka.BatchSize,
 		BatchTimeout: cfg.Kafka.BatchTimeout,
 		Heartbeat:    heartbeat,
+		Classify:     pg.ClassifyError,
+		RetryBudget:  cfg.Kafka.RetryBudget,
 	}, processor)
 	if err != nil {
 		return err
