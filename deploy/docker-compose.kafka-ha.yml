@@ -26,6 +26,13 @@ x-kafka-ha-env: &kafka-ha-env
   KAFKA_DEFAULT_REPLICATION_FACTOR: 3
   KAFKA_MIN_INSYNC_REPLICAS: 2
   KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  # Как быстро контроллер исключает пропавший брокер (по умолчанию 9 с и пульс раз в 2 с). При RF=3
+  # на трёх брокерах реплика на каждом брокере есть у всех партиций, а с acks=all лидер ждёт её, пока
+  # брокер не исключён: всё это время запись стоит во всех партициях. Замер chaos_broker.sh (этап 11,
+  # A8): UNAVAILABLE 17,5% при 9 с, 9,8% при 3 с. Цена — риск ложно исключить живой брокер, если
+  # GC-пауза или сетевая задержка дольше таймаута; тогда лидеры переезжают без причины.
+  KAFKA_BROKER_SESSION_TIMEOUT_MS: 3000
+  KAFKA_BROKER_HEARTBEAT_INTERVAL_MS: 500
 
 x-kafka-healthcheck: &kafka-healthcheck
   test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
