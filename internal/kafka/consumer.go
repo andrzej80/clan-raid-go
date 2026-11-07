@@ -75,6 +75,9 @@ const pollTimeout = 5 * time.Second
 // миллисекунды; предел меньше health.DefaultMaxStall с запасом на паузу между повторами (до 5 с).
 const attemptTimeout = 30 * time.Second
 
+// bufferedBatches — во сколько пачек входной буфер партиции, после которого её чтение ставится на паузу.
+const bufferedBatches = 2
+
 // Consumer читает raid.hits группой консьюмеров. На каждую назначенную партицию — своя горутина:
 // она копит пачку (до BatchSize записей или BatchTimeout), обрабатывает её и только после этого
 // коммитит offset. Автокоммит выключен: гарантия at-least-once.
@@ -87,6 +90,8 @@ type Consumer struct {
 	// pollTimeout и attemptTimeout — одноимённые константы; в тестах короче.
 	pollTimeout    time.Duration
 	attemptTimeout time.Duration
+	// maxBuffered — сколько записей партиции копится, пока её горутина занята, до паузы чтения.
+	maxBuffered int
 
 	// workCtx живёт до Close: пачка, начатая при остановке, должна дообработаться, поэтому он
 	// не привязан к контексту Run (его отменяет сигнал).
@@ -129,6 +134,9 @@ func NewBatchConsumer(cfg ConsumerConfig, handler BatchHandler, extra ...kgo.Opt
 		partitions:     make(map[topicPartition]*partitionWorker),
 		pollTimeout:    pollTimeout,
 		attemptTimeout: attemptTimeout,
+		// Две пачки: одна обрабатывается, вторая копится. Больше не нужно для пропускной
+		// способности, а память на застрявшую партицию остаётся ограниченной.
+		maxBuffered: bufferedBatches * cfg.BatchSize,
 	}
 	c.workCtx, c.cancelWork = context.WithCancel(context.Background())
 	opts := append([]kgo.Opt{
@@ -187,8 +195,10 @@ func (c *Consumer) Run(ctx context.Context) error {
 	}
 }
 
-// route передаёт записи горутине партиции. Если партицию как раз отзывают, записи отбрасываются:
-// offset не закоммичен, их заново прочитает новый владелец.
+// route передаёт записи горутине партиции и никогда не ждёт её: иначе одна партиция, застрявшая
+// в повторах пачки, останавливала бы цикл опроса и вместе с ним все остальные партиции экземпляра.
+// Если партицию как раз отзывают, записи отбрасываются: offset не закоммичен, их заново прочитает
+// новый владелец.
 func (c *Consumer) route(tp topicPartition, records []*kgo.Record) {
 	c.mu.Lock()
 	w := c.partitions[tp]
@@ -196,10 +206,7 @@ func (c *Consumer) route(tp topicPartition, records []*kgo.Record) {
 	if w == nil {
 		return
 	}
-	select {
-	case w.records <- records:
-	case <-w.quit:
-	}
+	w.push(records)
 }
 
 func (c *Consumer) onAssigned(_ context.Context, _ *kgo.Client, assigned map[string][]int32) {
@@ -211,7 +218,7 @@ func (c *Consumer) onAssigned(_ context.Context, _ *kgo.Client, assigned map[str
 			w := &partitionWorker{
 				consumer: c,
 				tp:       tp,
-				records:  make(chan []*kgo.Record),
+				notify:   make(chan struct{}, 1),
 				quit:     make(chan struct{}),
 				done:     make(chan struct{}),
 			}
@@ -265,17 +272,77 @@ func (c *Consumer) Close() {
 type partitionWorker struct {
 	consumer *Consumer
 	tp       topicPartition
-	records  chan []*kgo.Record
+	notify   chan struct{} // ёмкость 1: во входном буфере появились записи
 	quit     chan struct{} // закрывается при отзыве партиции или остановке
 	done     chan struct{} // закрывается, когда горутина завершилась
+
+	// Входной буфер: цикл опроса дописывает, горутина партиции забирает целиком. Когда в нём
+	// maxBuffered записей и больше, партиция ставится на паузу (paused) и снимается с неё, когда
+	// горутина забирает буфер. Пауза ограничивает память и не теряет записи: то, что клиент уже
+	// получил от брокера, но не отдал из PollFetches, он выбрасывает, не сдвигая позицию чтения, и
+	// после возобновления читает заново.
+	inboxMu sync.Mutex
+	inbox   []*kgo.Record
+	paused  bool
 
 	// Для метрики лага. Оба значения — "следующий offset"; -1 — ещё неизвестно.
 	highWatermark atomic.Int64 // конец партиции по последнему ответу брокера
 	processed     atomic.Int64 // offset, с которого начнётся необработанное
 }
 
+// push дописывает записи во входной буфер и будит горутину партиции, не дожидаясь её.
+func (w *partitionWorker) push(records []*kgo.Record) {
+	w.inboxMu.Lock()
+	w.inbox = append(w.inbox, records...)
+	if !w.paused && len(w.inbox) >= w.consumer.maxBuffered {
+		w.paused = true
+		w.consumer.client.PauseFetchPartitions(map[string][]int32{w.tp.topic: {w.tp.partition}})
+		slog.Warn("kafka partition paused: worker is behind",
+			"topic", w.tp.topic, "partition", w.tp.partition, "buffered", len(w.inbox))
+	}
+	w.inboxMu.Unlock()
+
+	select {
+	case w.notify <- struct{}{}:
+	default: // горутина уже разбужена
+	}
+}
+
+// take забирает весь входной буфер и снимает партицию с паузы: место освободилось.
+func (w *partitionWorker) take() []*kgo.Record {
+	w.inboxMu.Lock()
+	defer w.inboxMu.Unlock()
+	records := w.inbox
+	w.inbox = nil
+	w.resumeLocked()
+	return records
+}
+
+func (w *partitionWorker) resumeLocked() {
+	if !w.paused {
+		return
+	}
+	w.paused = false
+	w.consumer.client.ResumeFetchPartitions(map[string][]int32{w.tp.topic: {w.tp.partition}})
+	slog.Info("kafka partition resumed", "topic", w.tp.topic, "partition", w.tp.partition)
+}
+
+// isPaused — для метрики.
+func (w *partitionWorker) isPaused() bool {
+	w.inboxMu.Lock()
+	defer w.inboxMu.Unlock()
+	return w.paused
+}
+
 func (w *partitionWorker) run(ctx context.Context) {
 	defer close(w.done)
+	// Пауза хранится в клиенте, а не в горутине: если оставить партицию на паузе при отзыве, то
+	// при повторном назначении этому же экземпляру её никто не стал бы читать.
+	defer func() {
+		w.inboxMu.Lock()
+		w.resumeLocked()
+		w.inboxMu.Unlock()
+	}()
 
 	cfg := w.consumer.cfg
 	var (
@@ -297,8 +364,8 @@ func (w *partitionWorker) run(ctx context.Context) {
 
 	for {
 		select {
-		case recs := <-w.records:
-			buf = append(buf, recs...)
+		case <-w.notify:
+			buf = append(buf, w.take()...)
 			switch {
 			case len(buf) >= cfg.BatchSize:
 				flush()

@@ -112,18 +112,30 @@ func registerLagGauge(mp metric.MeterProvider, c *Consumer) (metric.Registration
 	if err != nil {
 		return nil, fmt.Errorf("create lag gauge: %w", err)
 	}
+	paused, err := meter.Int64ObservableGauge("raidboss.kafka.consumer.paused",
+		metric.WithDescription("1 while fetching of the partition is paused because its worker is behind"),
+		metric.WithUnit("{partition}"))
+	if err != nil {
+		return nil, fmt.Errorf("create paused gauge: %w", err)
+	}
 	reg, err := meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		for tp, w := range c.partitions {
+			attrs := metric.WithAttributes(
+				attribute.String("topic", tp.topic),
+				attribute.Int("partition", int(tp.partition)))
 			if v, ok := w.lag(); ok {
-				o.ObserveInt64(lag, v, metric.WithAttributes(
-					attribute.String("topic", tp.topic),
-					attribute.Int("partition", int(tp.partition))))
+				o.ObserveInt64(lag, v, attrs)
 			}
+			var p int64
+			if w.isPaused() {
+				p = 1
+			}
+			o.ObserveInt64(paused, p, attrs)
 		}
 		return nil
-	}, lag)
+	}, lag, paused)
 	if err != nil {
 		return nil, fmt.Errorf("register lag gauge: %w", err)
 	}

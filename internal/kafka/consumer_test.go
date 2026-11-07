@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -340,4 +341,117 @@ func TestConsumer_AttemptTimeoutRetriesHangingBatch(t *testing.T) {
 	startConsumer(t, c)
 
 	eventually(t, "hit processed after the hanging attempt timed out", func() bool { return len(proc.seen()) == 1 })
+}
+
+// gateProcessor не обрабатывает удары рейда blocked, пока не открыт (Postgres держит строку
+// рейда или отвечает ошибкой), остальные обрабатывает сразу.
+type gateProcessor struct {
+	mu      sync.Mutex
+	blocked uuid.UUID
+	open    bool
+	hits    []domain.Hit
+}
+
+func (g *gateProcessor) ProcessBatch(_ context.Context, hits []domain.Hit) (domain.BatchResult, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.open && slices.ContainsFunc(hits, func(h domain.Hit) bool { return h.RaidID == g.blocked }) {
+		return domain.BatchResult{}, errors.New("raid row is locked")
+	}
+	g.hits = append(g.hits, hits...)
+	return domain.BatchResult{}, nil
+}
+
+func (g *gateProcessor) seenFor(raidID uuid.UUID) []uuid.UUID {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var ids []uuid.UUID
+	for _, h := range g.hits {
+		if h.RaidID == raidID {
+			ids = append(ids, h.ID)
+		}
+	}
+	return ids
+}
+
+func (g *gateProcessor) unblock() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.open = true
+}
+
+// raidsInDifferentPartitions подбирает два рейда, ключи которых продюсер кладёт в разные партиции.
+func raidsInDifferentPartitions(t *testing.T) (a, b uuid.UUID) {
+	t.Helper()
+	part := kgo.StickyKeyPartitioner(nil).ForTopic(testTopic)
+	partitionOf := func(id uuid.UUID) int {
+		return part.Partition(&kgo.Record{Key: []byte(id.String())}, testPartitions)
+	}
+	a = uuid.New()
+	for range 1000 {
+		if b = uuid.New(); partitionOf(b) != partitionOf(a) {
+			return a, b
+		}
+	}
+	t.Fatal("no raid in another partition")
+	return a, b
+}
+
+func (c *Consumer) pausedPartitions() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, w := range c.partitions {
+		if w.isPaused() {
+			n++
+		}
+	}
+	return n
+}
+
+// Пачка одного рейда повторяется (строка рейда заблокирована), а удары рейда из другой партиции
+// того же экземпляра обрабатываются без ожидания. Отстающая партиция ставится на паузу, а когда
+// причина уходит, её удары обрабатываются все и по порядку.
+func TestConsumer_StuckPartitionDoesNotBlockOthers(t *testing.T) {
+	t.Parallel()
+
+	brokers := startConsumerCluster(t)
+	raidA, raidB := raidsInDifferentPartitions(t)
+	proc := &gateProcessor{blocked: raidA}
+	c, err := NewConsumer(ConsumerConfig{
+		Brokers: brokers, Topic: testTopic, DLQTopic: testDLQTopic, Group: "test-group",
+		BatchSize: 1, BatchTimeout: 10 * time.Millisecond,
+	}, proc)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	startConsumer(t, c)
+
+	// Первый удар рейда A уводит его горутину в повторы. Следующие копятся во входном буфере
+	// (maxBuffered = 2 при BatchSize 1), и партиция A ставится на паузу. В прежней версии цикл
+	// опроса ждал горутину A и на этом месте останавливался для всех партиций.
+	hitsA := make([]domain.Hit, 5)
+	for i := range hitsA {
+		hitsA[i] = newHit(raidA)
+	}
+	publishHits(t, brokers, hitsA...)
+	eventually(t, "partition of raid A paused", func() bool { return c.pausedPartitions() == 1 })
+
+	hitB := newHit(raidB)
+	publishHits(t, brokers, hitB)
+	eventually(t, "hit of raid B processed while raid A is stuck", func() bool {
+		return len(proc.seenFor(raidB)) == 1
+	})
+
+	proc.unblock()
+	eventually(t, "all hits of raid A processed after unblock", func() bool {
+		return len(proc.seenFor(raidA)) == len(hitsA)
+	})
+	got := proc.seenFor(raidA)
+	for i, h := range hitsA {
+		if got[i] != h.ID {
+			t.Fatalf("raid A hit %d = %v, want %v: order broken by pause/resume", i, got[i], h.ID)
+		}
+	}
+	eventually(t, "partition of raid A resumed", func() bool { return c.pausedPartitions() == 0 })
 }
