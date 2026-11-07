@@ -16,7 +16,9 @@ set -a
 source deploy/.env
 set +a
 
-DC="docker compose -f deploy/docker-compose.yml --env-file deploy/.env"
+# COMPOSE_EXTRA — дополнительные compose-файлы, например "-f deploy/docker-compose.kafka-ha.yml".
+# KAFKA_BROKERS_EXTRA — брокеры сверх kafka, которые infra_up должен дождаться ("kafka-2 kafka-3").
+DC="docker compose -f deploy/docker-compose.yml ${COMPOSE_EXTRA:-} --env-file deploy/.env"
 export DATABASE_URL="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:${POSTGRES_PORT}/${POSTGRES_DB}"
 export REDIS_URL="redis://localhost:${REDIS_PORT}"
 KAFKA_BIN=/opt/kafka/bin
@@ -42,6 +44,16 @@ group_lag() {
   docker exec kafka $KAFKA_BIN/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
     --describe --group "$1" 2>/dev/null |
     awk 'NR > 1 && $6 ~ /^[0-9]+$/ { sum += $6; seen = 1 } END { if (seen) print sum; else print -1 }'
+}
+
+# drained_lag <группа> <топик>: лаг группы, но 0, если группы ещё нет, а топик пуст. Так бывает
+# на свежем кластере: в raid.events нет событий, rewards-worker ничего не коммитил, и group_lag
+# навсегда остаётся -1.
+drained_lag() {
+  local lag
+  lag=$(group_lag "$1")
+  if [ "$lag" = "-1" ] && [ "$(topic_records "$2")" = "0" ]; then lag=0; fi
+  echo "$lag"
 }
 
 # Сумма end-offset'ов всех партиций топиков: сколько записей в них записано.
@@ -87,8 +99,10 @@ build_tools() {
 
 infra_up() {
   step "infrastructure: postgres, kafka, redis, topics"
-  $DC up -d --wait pg kafka redis
-  $DC up --no-deps kafka-init
+  # shellcheck disable=SC2086 # список брокеров разбивается на слова намеренно
+  $DC up -d --wait pg kafka ${KAFKA_BROKERS_EXTRA:-} redis
+  # --build: kafka-init — это raidctl, образ должен соответствовать текущему описанию топиков.
+  $DC up --build --no-deps kafka-init
 }
 
 # migrate_seed <кланов> <игроков на клан>: сидит только если игроков меньше, чем нужно.
@@ -131,7 +145,7 @@ start_load() {
   "$BIN_DIR/botsim$EXE" --addr "localhost:${APP_PORT}" --clans "$CLANS" --players "$PLAYERS" \
     --hp "$HP" --duration "$DURATION" --mode "${MODE:-open}" --target-rps "${TARGET_RPS:-300}" \
     --rate "${RATE:-2}" --conns "${CONNS:-1}" --watchers "${WATCHERS:-0}" \
-    --ramp-up "${RAMP_UP:-0s}" --json "$REPORT_JSON" \
+    --ramp-up "${RAMP_UP:-0s}" --dup-prob "${DUP_PROB:-0.05}" --json "$REPORT_JSON" \
     >"$BIN_DIR/botsim.out" &
   BOTSIM_PID=$!
 }
@@ -144,10 +158,10 @@ finish_load() {
 # drain_pipeline ждёт, пока консьюмер, relay и worker разберут все очереди.
 drain_pipeline() {
   step "waiting for consumers and relays to drain"
-  wait_until "hits-consumer lag" 'group_lag hits-consumer'
-  wait_until "rewards-worker lag" 'group_lag rewards-worker'
+  wait_until "hits-consumer lag" 'drained_lag hits-consumer raid.hits'
+  wait_until "rewards-worker lag" 'drained_lag rewards-worker raid.events'
   wait_until "unsent outbox records" "psql_q 'SELECT count(*) FROM outbox WHERE sent_at IS NULL'"
-  wait_until "rewards-worker lag after relays" 'group_lag rewards-worker'
+  wait_until "rewards-worker lag after relays" 'drained_lag rewards-worker raid.events'
   wait_until "unsent outbox records after worker" "psql_q 'SELECT count(*) FROM outbox WHERE sent_at IS NULL'"
 }
 

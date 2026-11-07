@@ -124,7 +124,7 @@ service:
 | `outbox-relay` | Переносит события из таблицы `outbox` в Kafka |
 | `scheduler` | Переводит просроченные рейды в `expired` |
 | `botsim` | Нагрузочный симулятор игроков (gRPC-клиент) |
-| `raidctl` | CLI: seed, verify (проверка инвариантов), rebuild-cache, outbox dump |
+| `raidctl` | CLI: seed, verify (проверка инвариантов), rebuild-cache, outbox dump, topics diff/apply |
 | `raidwatch` | Терминальный демо-клиент: живое состояние рейда через `WatchRaid` |
 
 ### Структура репозитория
@@ -374,12 +374,17 @@ Payload в outbox бинарный, поэтому для отладки нуж�
 
 ## 5. Kafka
 
-| Топик | Ключ | Партиций | Сообщение | Продюсер → консьюмер |
-|---|---|---|---|---|
-| `raid.hits` | `raid_id` | 12 | `HitEvent` | api → hits-consumer |
-| `raid.hits.dlq` | `raid_id` | 1 | исходные байты + причина в заголовке | hits-consumer (битые сообщения) |
-| `raid.events` | `raid_id` | 6 | `RaidEvent` | outbox-relay → rewards-worker |
-| `rewards.granted` | `player_id` | 6 | `RewardGranted` | outbox-relay → (внешние потребители) |
+| Топик | Ключ | Партиций | Хранение | Сообщение | Продюсер → консьюмер |
+|---|---|---|---|---|---|
+| `raid.hits` | `raid_id` | 12 | 3 дня | `HitEvent` | api → hits-consumer |
+| `raid.hits.dlq` | `raid_id` | 1 | 14 дней | исходные байты + причина в заголовке | hits-consumer (битые сообщения) |
+| `raid.events` | `raid_id` | 6 | 7 дней | `RaidEvent` | outbox-relay → rewards-worker |
+| `raid.events.dlq` | `raid_id` | 1 | 14 дней | исходные байты + причина в заголовке | rewards-worker (битые события) |
+| `rewards.granted` | `player_id` | 6 | 7 дней | `RewardGranted` | outbox-relay → (внешние потребители) |
+
+Топики описаны в коде, в `internal/kafka/topics.go`: партиции, срок хранения, `cleanup.policy` и `min.insync.replicas`. `raidctl topics diff` сверяет с ним кластер, `raidctl topics apply` создаёт недостающие топики и выставляет настройки (в compose это делает `kafka-init`). Число партиций и фактор репликации существующих топиков `apply` не меняет: смена партиций переносит ключи `raid_id` в другие партиции. Автосоздание топиков у брокера выключено.
+
+**Надёжность записи.** Продюсеры пишут с `acks=all` и идемпотентно (по умолчанию в franz-go). В compose по умолчанию один брокер и RF=1 — это стенд разработки. Продовая конфигурация — `deploy/docker-compose.kafka-ha.yml`: три брокера, RF=3, `min.insync.replicas=2`; потеря одного брокера не теряет подтверждённых записей и не останавливает запись (проверяет `loadtest/chaos_broker.sh`).
 
 ```protobuf
 // proto/raidboss/events/v1/events.proto

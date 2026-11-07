@@ -1,0 +1,91 @@
+# Kafka из трёх брокеров (этап 11, B6): RF=3, min.insync.replicas=2, acks=all у продюсеров.
+# Кластер переживает потерю одного брокера без потери подтверждённых записей и без остановки записи.
+# Накладывается поверх основного файла:
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.kafka-ha.yml --env-file deploy/.env up -d
+#
+# Хаос-сценарий с потерей брокера: loadtest/chaos_broker.sh.
+#
+# Топики создаёт kafka-init (raidctl topics apply) с KAFKA_REPLICATION_FACTOR=3. Если до этого
+# поднимался кластер из одного брокера с теми же данными, топики с RF=1 остаются: apply сообщит о
+# расхождении и не запустит сервисы. Данные Kafka в compose не сохраняются между пересозданиями
+# контейнеров, поэтому достаточно `down` перед `up`.
+
+x-kafka-ha-env: &kafka-ha-env
+  # Общий идентификатор KRaft-кластера: у всех узлов один. Значение — пример из документации Kafka.
+  CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093,2@kafka-2:9093,3@kafka-3:9093
+  KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+  KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+  KAFKA_MIN_INSYNC_REPLICAS: 2
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+x-kafka-healthcheck: &kafka-healthcheck
+  test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+  interval: 5s
+  timeout: 10s
+  retries: 20
+  start_period: 20s
+
+# Все брокеры в списке seed: сервис, перезапущенный, пока лежит первый брокер, иначе не подключится.
+x-kafka-brokers: &kafka-brokers
+  KAFKA_BROKERS: kafka:9092,kafka-2:9092,kafka-3:9092
+
+services:
+  kafka:
+    environment:
+      <<: *kafka-ha-env
+      KAFKA_NODE_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:${KAFKA_EXTERNAL_PORT}
+
+  kafka-2:
+    image: apache/kafka:4.3.1
+    container_name: kafka-2
+    networks:
+      - app
+    ports:
+      - "${KAFKA_EXTERNAL_PORT_2:-9095}:9094"
+    environment:
+      <<: *kafka-ha-env
+      KAFKA_NODE_ID: 2
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-2:9092,EXTERNAL://localhost:${KAFKA_EXTERNAL_PORT_2:-9095}
+    healthcheck: *kafka-healthcheck
+
+  kafka-3:
+    image: apache/kafka:4.3.1
+    container_name: kafka-3
+    networks:
+      - app
+    ports:
+      - "${KAFKA_EXTERNAL_PORT_3:-9096}:9094"
+    environment:
+      <<: *kafka-ha-env
+      KAFKA_NODE_ID: 3
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-3:9092,EXTERNAL://localhost:${KAFKA_EXTERNAL_PORT_3:-9096}
+    healthcheck: *kafka-healthcheck
+
+  kafka-init:
+    depends_on:
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
+    environment:
+      <<: *kafka-brokers
+      KAFKA_REPLICATION_FACTOR: "3"
+
+  api:
+    environment: *kafka-brokers
+  hits-consumer:
+    environment: *kafka-brokers
+  outbox-relay:
+    environment: *kafka-brokers
+  rewards-worker:
+    environment: *kafka-brokers

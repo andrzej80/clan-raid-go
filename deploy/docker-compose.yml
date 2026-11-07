@@ -70,6 +70,9 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Топики создаёт только kafka-init (raidctl topics apply). Автосоздание дало бы топик с одной
+      # партицией и настройками по умолчанию, и ошибку в имени топика никто бы не заметил.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
       interval: 5s
@@ -77,26 +80,25 @@ services:
       retries: 20
       start_period: 20s
 
-  # Одноразовый контейнер: создаёт топики и завершается. Без заранее созданного топика
-  # raid.hits автосоздание дало бы одну партицию вместо 12.
+  # Одноразовый контейнер: приводит топики к описанию в коде (internal/kafka/topics.go: партиции,
+  # retention, min.insync.replicas) и завершается. Партиции и фактор репликации существующих
+  # топиков не меняет: при расхождении выходит с ошибкой, и сервисы не стартуют.
   kafka-init:
-    image: apache/kafka:4.3.1
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      args:
+        SERVICE: raidctl
     depends_on:
       kafka:
         condition: service_healthy
     networks:
       - app
     restart: "no"
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        set -e
-        create() { /opt/kafka/bin/kafka-topics.sh --bootstrap-server=kafka:9092 --create --if-not-exists --topic=$$1 --partitions=$$2 --replication-factor=1; }
-        create raid.hits 12
-        create raid.hits.dlq 1
-        create raid.events 6
-        create raid.events.dlq 1
-        create rewards.granted 6
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - KAFKA_REPLICATION_FACTOR=${KAFKA_REPLICATION_FACTOR:-1}
+    command: ["./server", "topics", "apply", "--wait", "2m"]
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest

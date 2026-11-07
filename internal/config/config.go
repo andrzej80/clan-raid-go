@@ -83,6 +83,9 @@ type KafkaConfig struct {
 	ConsumerGroup string
 	BatchSize     int
 	BatchTimeout  time.Duration
+	// ReplicationFactor — фактор репликации топиков (KAFKA_REPLICATION_FACTOR, по умолчанию 1).
+	// Нужен только raidctl topics: сервисы топики не создают.
+	ReplicationFactor int16
 }
 
 // OutboxConfig — параметры outbox-relay.
@@ -251,6 +254,10 @@ func loadRedis() rdb.Config {
 	}
 }
 
+// LoadKafka читает только настройки Kafka. raidctl topics работает без DATABASE_URL, поэтому
+// полный Load ему не подходит.
+func LoadKafka() KafkaConfig { return loadKafka() }
+
 func loadKafka() KafkaConfig {
 	cfg := KafkaConfig{
 		HitsTopic:     defaultHitsTopic,
@@ -293,6 +300,8 @@ func loadKafka() KafkaConfig {
 	if cfg.BatchSize < 1 {
 		cfg.BatchSize = defaultBatchSize
 	}
+	cfg.ReplicationFactor = int16(getEnvInt("KAFKA_REPLICATION_FACTOR", 1)) //nolint:gosec // фактор репликации — единицы
+	cfg.ReplicationFactor = max(cfg.ReplicationFactor, 1)
 	return cfg
 }
 

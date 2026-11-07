@@ -419,3 +419,23 @@ func TestLoadProbe(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadKafkaReplicationFactor(t *testing.T) {
+	tests := []struct {
+		env  string
+		want int16
+	}{
+		{"", 1},
+		{"3", 3},
+		{"0", 1},
+		{"bad", 1},
+	}
+	for _, tc := range tests {
+		t.Run("env="+tc.env, func(t *testing.T) {
+			t.Setenv("KAFKA_REPLICATION_FACTOR", tc.env)
+			if got := LoadKafka().ReplicationFactor; got != tc.want {
+				t.Fatalf("ReplicationFactor = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

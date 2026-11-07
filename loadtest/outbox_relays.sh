@@ -85,7 +85,7 @@ go build -o "$BIN_DIR/botsim$EXE" ./cmd/botsim
 
 step "infrastructure: postgres, kafka, redis, topics"
 $DC up -d --wait pg kafka redis
-$DC up --no-deps kafka-init
+$DC up --build --no-deps kafka-init
 
 step "migrations and seed"
 "$BIN_DIR/raidctl$EXE" migrate --dir migrations

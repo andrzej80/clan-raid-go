@@ -1,4 +1,4 @@
-// raidctl — служебный CLI: migrate, seed, verify, rebuild-cache, outbox dump.
+// raidctl — служебный CLI: migrate, seed, verify, rebuild-cache, outbox dump, topics.
 package main
 
 import (
@@ -29,6 +29,12 @@ commands:
           rebuild the Redis leaderboard and hp cache from PostgreSQL (raidctl rebuild-cache [--raid <uuid>])
   outbox dump
           print outbox records as JSON lines, payload decoded (raidctl outbox dump [--unsent] [--topic t] [--key k] [--limit 50])
+  topics diff
+          compare Kafka topics with the spec in code (partitions, replication, retention, min.insync.replicas);
+          exit code 1 on differences
+  topics apply
+          create missing topics and fix their configs (raidctl topics apply [--wait 1m]); partitions and
+          replication factor are never changed, a difference there is reported with exit code 1
 `
 
 func main() {
@@ -64,6 +70,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return runSeed(ctx, args[1:], out)
 	case "outbox":
 		return runOutbox(ctx, args[1:], out)
+	case "topics":
+		return runTopics(ctx, args[1:], out)
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", args[0], usage)
 	}
