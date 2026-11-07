@@ -53,6 +53,19 @@ const (
 
 const defaultSchedulerInterval = 10 * time.Second
 
+const (
+	defaultProbeAddr     = ":8081"
+	defaultProbeMaxStall = time.Minute
+)
+
+// ProbeConfig — HTTP-сервер проб (/livez, /readyz) и pprof. Порт не публикуется наружу.
+type ProbeConfig struct {
+	// Addr — адрес прослушивания (PROBE_ADDR).
+	Addr string
+	// MaxStall — сколько главный цикл может не отмечаться до ответа 503 на /livez (LIVENESS_MAX_STALL).
+	MaxStall time.Duration
+}
+
 // KafkaConfig: Brokers может быть пустым (raidctl Kafka не нужна), api проверяет это при старте.
 type KafkaConfig struct {
 	Brokers      []string
@@ -116,6 +129,7 @@ type Config struct {
 	Outbox    OutboxConfig
 	Scheduler SchedulerConfig
 	Watch     WatchConfig
+	Probe     ProbeConfig
 }
 
 // PublicServices — сервисы, которым не нужна авторизация
@@ -180,7 +194,19 @@ func Load() (*Config, error) {
 	cfg.Outbox = loadOutbox()
 	cfg.Scheduler = SchedulerConfig{Interval: positiveDuration("SCHEDULER_INTERVAL", defaultSchedulerInterval)}
 	cfg.Watch = loadWatch()
+	cfg.Probe = loadProbe()
 	return cfg, nil
+}
+
+func loadProbe() ProbeConfig {
+	addr := os.Getenv("PROBE_ADDR")
+	if addr == "" {
+		addr = defaultProbeAddr
+	}
+	return ProbeConfig{
+		Addr:     addr,
+		MaxStall: positiveDuration("LIVENESS_MAX_STALL", defaultProbeMaxStall),
+	}
 }
 
 func loadWatch() WatchConfig {

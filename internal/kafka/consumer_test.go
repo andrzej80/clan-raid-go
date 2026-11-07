@@ -12,6 +12,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/andrzej80/clan-raid-go/internal/domain"
+	"github.com/andrzej80/clan-raid-go/internal/health"
 )
 
 const testDLQTopic = "raid.hits.dlq"
@@ -282,5 +283,32 @@ func TestNewConsumer_Validation(t *testing.T) {
 		if _, err := NewConsumer(cfg, &fakeProcessor{}); err == nil {
 			t.Errorf("%s: expected error", name)
 		}
+	}
+}
+
+func TestConsumer_HeartbeatWhileIdleAndRetrying(t *testing.T) {
+	t.Parallel()
+
+	brokers := startConsumerCluster(t)
+	hb := &health.Heartbeat{}
+	proc := &fakeProcessor{fail: 3}
+	c, err := NewConsumer(ConsumerConfig{
+		Brokers: brokers, Topic: testTopic, DLQTopic: testDLQTopic, Group: "test-group",
+		BatchSize: 500, BatchTimeout: 20 * time.Millisecond, Heartbeat: hb,
+	}, proc)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	c.pollTimeout = 50 * time.Millisecond
+	startConsumer(t, c)
+
+	// Топик пуст: PollFetches не возвращает записей, но цикл опроса всё равно отмечается.
+	first := time.Now()
+	eventually(t, "heartbeat while idle", func() bool { return hb.Last().After(first) })
+
+	publishHits(t, brokers, newHit(uuid.New()))
+	eventually(t, "hit processed after retries", func() bool { return len(proc.seen()) == 1 })
+	if since := time.Since(hb.Last()); since > time.Second {
+		t.Fatalf("last heartbeat %v ago, want recent", since)
 	}
 }

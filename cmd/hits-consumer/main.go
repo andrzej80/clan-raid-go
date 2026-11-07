@@ -7,6 +7,7 @@ import (
 
 	"github.com/andrzej80/clan-raid-go/internal/app"
 	"github.com/andrzej80/clan-raid-go/internal/config"
+	"github.com/andrzej80/clan-raid-go/internal/health"
 	"github.com/andrzej80/clan-raid-go/internal/kafka"
 	"github.com/andrzej80/clan-raid-go/internal/raid"
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
@@ -55,6 +56,7 @@ func run(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 
+	heartbeat := health.NewHeartbeat()
 	consumer, err := kafka.NewConsumer(kafka.ConsumerConfig{
 		Brokers:      cfg.Kafka.Brokers,
 		Topic:        cfg.Kafka.HitsTopic,
@@ -62,6 +64,7 @@ func run(ctx context.Context, cfg *config.Config) error {
 		Group:        cfg.Kafka.ConsumerGroup,
 		BatchSize:    cfg.Kafka.BatchSize,
 		BatchTimeout: cfg.Kafka.BatchTimeout,
+		Heartbeat:    heartbeat,
 	}, processor)
 	if err != nil {
 		return err
@@ -69,6 +72,13 @@ func run(ctx context.Context, cfg *config.Config) error {
 	// Close после Run: к этому моменту горутины партиций дообработали и закоммитили свои пачки,
 	// а пул Postgres (defer выше) закрывается уже после выхода из группы.
 	defer consumer.Close()
+
+	// Redis в readiness нет: запись в него best-effort, без Redis удары всё равно применяются.
+	stopProbes, err := app.StartProbes(ctx, cfg.Probe, heartbeat, app.PostgresCheck(dbPool), app.KafkaCheck(consumer))
+	if err != nil {
+		return err
+	}
+	defer stopProbes()
 
 	slog.Info("hits-consumer started",
 		"topic", cfg.Kafka.HitsTopic, "group", cfg.Kafka.ConsumerGroup,

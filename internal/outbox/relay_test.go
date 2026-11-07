@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/andrzej80/clan-raid-go/internal/domain"
+	"github.com/andrzej80/clan-raid-go/internal/health"
 )
 
 // fakeStore имитирует таблицу outbox. Откат транзакции моделируется снимком sent на входе.
@@ -251,4 +252,31 @@ type cancelingPublisher struct{ cancel context.CancelFunc }
 func (p *cancelingPublisher) PublishBatch(ctx context.Context, _ []domain.OutboxMessage) error {
 	p.cancel() // сигнал остановки приходит во время публикации
 	return ctx.Err()
+}
+
+func TestRun_BeatsHeartbeatWhileIdle(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeStore(0)
+	hb := &health.Heartbeat{}
+	r, err := NewRelay(fakeTx{store}, store, &fakePublisher{}, Config{
+		BatchSize: 10, PollInterval: 5 * time.Millisecond, Heartbeat: hb,
+	})
+	if err != nil {
+		t.Fatalf("NewRelay: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() { _ = r.Run(ctx) }()
+
+	first := time.Now()
+	deadline := time.After(2 * time.Second)
+	for !hb.Last().After(first.Add(20 * time.Millisecond)) {
+		select {
+		case <-deadline:
+			t.Fatal("relay did not keep beating while the queue is empty")
+		case <-time.After(time.Millisecond):
+		}
+	}
 }

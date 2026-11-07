@@ -16,6 +16,7 @@ import (
 
 	eventsV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/events/v1"
 	"github.com/andrzej80/clan-raid-go/internal/domain"
+	"github.com/andrzej80/clan-raid-go/internal/health"
 )
 
 const meterName = "github.com/andrzej80/clan-raid-go/internal/scheduler"
@@ -31,6 +32,8 @@ type Config struct {
 	MeterProvider metric.MeterProvider
 	// Publisher необязателен: без него подписчики WatchRaid узнают об истечении только после переподключения.
 	Publisher ExpiredPublisher
+	// Heartbeat необязателен: отметка живости для /livez, ставится на каждом проходе.
+	Heartbeat *health.Heartbeat
 }
 
 // ExpiredPublisher сообщает подписчикам WatchRaid, что время рейда вышло.
@@ -72,6 +75,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	defer ticker.Stop()
 
 	for {
+		s.cfg.Heartbeat.Beat()
 		if n, err := s.ExpireOnce(ctx); err != nil {
 			if ctx.Err() != nil {
 				return nil

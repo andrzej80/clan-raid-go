@@ -12,6 +12,7 @@ import (
 
 	eventsV1 "github.com/andrzej80/clan-raid-go/gen/raidboss/events/v1"
 	"github.com/andrzej80/clan-raid-go/internal/domain"
+	"github.com/andrzej80/clan-raid-go/internal/health"
 )
 
 type fakeTx struct{}
@@ -213,5 +214,34 @@ func TestExpireOnce_NotifiesWatchers(t *testing.T) {
 	}
 	if len(pub.ids) != 2 || pub.ids[0] != first || pub.ids[1] != second {
 		t.Fatalf("notified = %v, want both raids in order", pub.ids)
+	}
+}
+
+func TestRun_BeatsHeartbeatOnEveryPass(t *testing.T) {
+	t.Parallel()
+
+	expiry := &fakeExpiry{}
+	hb := &health.Heartbeat{}
+	s, err := New(fakeTx{}, expiry, &fakeOutbox{}, Config{
+		Interval: 5 * time.Millisecond, EventsTopic: "raid.events", Heartbeat: hb,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() { _ = s.Run(ctx) }()
+
+	deadline := time.After(2 * time.Second)
+	for expiry.callCount() < 3 {
+		select {
+		case <-deadline:
+			t.Fatal("scheduler did not make 3 passes")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if since := time.Since(hb.Last()); since > time.Second {
+		t.Fatalf("last heartbeat %v ago, want a beat on every pass", since)
 	}
 }

@@ -390,3 +390,32 @@ func TestLoadWatch(t *testing.T) {
 		t.Fatalf("unexpected watch config: %+v", cfg.Watch)
 	}
 }
+
+func TestLoadProbe(t *testing.T) {
+	tests := []struct {
+		name      string
+		addr      string
+		stall     string
+		wantAddr  string
+		wantStall time.Duration
+	}{
+		{"defaults", "", "", ":8081", time.Minute},
+		{"override", "127.0.0.1:9100", "30s", "127.0.0.1:9100", 30 * time.Second},
+		{"non-positive stall falls back", "", "0s", ":8081", time.Minute},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "postgres://test@localhost/raidboss")
+			t.Setenv("PROBE_ADDR", tc.addr)
+			t.Setenv("LIVENESS_MAX_STALL", tc.stall)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.Probe.Addr != tc.wantAddr || cfg.Probe.MaxStall != tc.wantStall {
+				t.Fatalf("probe = %+v, want addr %q stall %v", cfg.Probe, tc.wantAddr, tc.wantStall)
+			}
+		})
+	}
+}

@@ -2,6 +2,15 @@ networks:
   app:
     driver: bridge
       
+# Проба сервисов приложения: /readyz на порту проб (PROBE_ADDR, по умолчанию :8081) внутри контейнера.
+# Порт наружу не публикуется: там же pprof. wget есть в alpine-образе (busybox).
+x-probe-healthcheck: &probe-healthcheck
+  test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/readyz"]
+  interval: 10s
+  timeout: 3s
+  retries: 3
+  start_period: 20s
+
 volumes:
   pg_data:
   vm_data:
@@ -203,6 +212,7 @@ services:
       # По умолчанию поведение прежнее: Kafka и пул по умолчанию (5).
       - ATTACK_MODE=${ATTACK_MODE:-kafka}
       - PG_MAX_CONNS=${API_PG_MAX_CONNS:-5}
+    healthcheck: *probe-healthcheck
     depends_on:
       pg:
         condition: service_healthy
@@ -239,6 +249,7 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_SERVICE_NAME=hits-consumer
       - OTEL_METRIC_EXPORT_INTERVAL=10000
+    healthcheck: *probe-healthcheck
     depends_on:
       pg:
         condition: service_healthy
@@ -270,6 +281,7 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_SERVICE_NAME=outbox-relay
       - OTEL_METRIC_EXPORT_INTERVAL=10000
+    healthcheck: *probe-healthcheck
     depends_on:
       pg:
         condition: service_healthy
@@ -297,6 +309,7 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_SERVICE_NAME=rewards-worker
       - OTEL_METRIC_EXPORT_INTERVAL=10000
+    healthcheck: *probe-healthcheck
     depends_on:
       pg:
         condition: service_healthy
@@ -324,6 +337,7 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_SERVICE_NAME=scheduler
       - OTEL_METRIC_EXPORT_INTERVAL=10000
+    healthcheck: *probe-healthcheck
     depends_on:
       pg:
         condition: service_healthy

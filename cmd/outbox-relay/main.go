@@ -8,6 +8,7 @@ import (
 
 	"github.com/andrzej80/clan-raid-go/internal/app"
 	"github.com/andrzej80/clan-raid-go/internal/config"
+	"github.com/andrzej80/clan-raid-go/internal/health"
 	"github.com/andrzej80/clan-raid-go/internal/kafka"
 	"github.com/andrzej80/clan-raid-go/internal/outbox"
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
@@ -49,13 +50,21 @@ func run(ctx context.Context, cfg *config.Config) error {
 		}
 	}()
 
+	heartbeat := health.NewHeartbeat()
 	relay, err := outbox.NewRelay(pg.NewTxManager(dbPool), pg.NewOutboxRepo(dbPool), publisher, outbox.Config{
 		BatchSize:    cfg.Outbox.BatchSize,
 		PollInterval: cfg.Outbox.PollInterval,
+		Heartbeat:    heartbeat,
 	})
 	if err != nil {
 		return err
 	}
+
+	stopProbes, err := app.StartProbes(ctx, cfg.Probe, heartbeat, app.PostgresCheck(dbPool), app.KafkaCheck(publisher))
+	if err != nil {
+		return err
+	}
+	defer stopProbes()
 
 	slog.Info("outbox-relay started", "batch_size", cfg.Outbox.BatchSize, "poll_interval", cfg.Outbox.PollInterval)
 	return relay.Run(ctx)

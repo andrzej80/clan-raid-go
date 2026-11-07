@@ -118,7 +118,7 @@ service:
 
 | Сервис | Что делает |
 |---|---|
-| `api` | gRPC API: приём ударов, стрим `WatchRaid`, чтение лидерборда. Отдельный HTTP-порт для pprof |
+| `api` | gRPC API: приём ударов, стрим `WatchRaid`, чтение лидерборда |
 | `hits-consumer` | Читает `raid.hits`, применяет урон в Postgres, обновляет Redis |
 | `rewards-worker` | Читает `raid.events`, начисляет награды |
 | `outbox-relay` | Переносит события из таблицы `outbox` в Kafka |
@@ -293,7 +293,7 @@ message ListRewardsResponse { repeated Reward rewards = 1; }
 - `grpc.health.v1`: `SERVING`, когда доступны Postgres, Redis и Kafka, иначе `NOT_SERVING`.
 - Server reflection регистрируется только при `GRPC_REFLECTION=true`. По умолчанию флаг выключен, в dev-окружении включён: без reflection не работают `grpcui` и `grpcurl` без `.proto`-файлов.
 - Keepalive: `MaxConnectionAge` (например, 5 мин) — чтобы клиенты периодически переподключались и нагрузка перераспределялась между экземплярами `api` (см. вопросы для самопроверки).
-- Отдельный HTTP-порт: только `/debug/pprof/*`. Эндпоинта `/metrics` нет: метрики уходят по OTLP в коллектор.
+- Отдельный HTTP-порт проб у каждого сервиса (`PROBE_ADDR`, по умолчанию `:8081`): `/livez`, `/readyz` и `/debug/pprof/*`, наружу не публикуется (см. [этап 11, B3](docs/stage-11-hardening.md#b3-health-и-readiness-у-фоновых-сервисов-p0)). Эндпоинта `/metrics` нет: метрики уходят по OTLP в коллектор.
 
 ---
 

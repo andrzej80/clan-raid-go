@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/andrzej80/clan-raid-go/internal/domain"
+	"github.com/andrzej80/clan-raid-go/internal/health"
 )
 
 const (
@@ -60,7 +61,15 @@ type ConsumerConfig struct {
 	BatchTimeout time.Duration
 	// MeterProvider необязателен: по умолчанию используется глобальный.
 	MeterProvider metric.MeterProvider
+	// Heartbeat необязателен: отметка живости для /livez. Отмечаются цикл опроса (не реже
+	// pollTimeout), каждая пачка и каждая попытка повтора, поэтому долгий повтор при недоступной
+	// БД не выглядит зависанием.
+	Heartbeat *health.Heartbeat
 }
+
+// pollTimeout ограничивает одно ожидание PollFetches: без записей в топике цикл опроса иначе
+// стоял бы бесконечно и не отмечал живость.
+const pollTimeout = 5 * time.Second
 
 // Consumer читает raid.hits группой консьюмеров. На каждую назначенную партицию — своя горутина:
 // она копит пачку (до BatchSize записей или BatchTimeout), обрабатывает её и только после этого
@@ -71,6 +80,8 @@ type Consumer struct {
 	cfg     ConsumerConfig
 	metrics *consumerMetrics
 	lagReg  metric.Registration
+	// pollTimeout — длительность одного ожидания PollFetches; в тестах короче.
+	pollTimeout time.Duration
 
 	// workCtx живёт до Close: пачка, начатая при остановке, должна дообработаться, поэтому он
 	// не привязан к контексту Run (его отменяет сигнал).
@@ -107,10 +118,11 @@ func NewBatchConsumer(cfg ConsumerConfig, handler BatchHandler, extra ...kgo.Opt
 	}
 
 	c := &Consumer{
-		handler:    handler,
-		cfg:        cfg,
-		metrics:    metrics,
-		partitions: make(map[topicPartition]*partitionWorker),
+		handler:     handler,
+		cfg:         cfg,
+		metrics:     metrics,
+		partitions:  make(map[topicPartition]*partitionWorker),
+		pollTimeout: pollTimeout,
 	}
 	c.workCtx, c.cancelWork = context.WithCancel(context.Background())
 	opts := append([]kgo.Opt{
@@ -145,11 +157,17 @@ func (c *Consumer) Run(ctx context.Context) error {
 	defer c.stopPartitions(nil)
 
 	for {
-		fetches := c.client.PollFetches(ctx)
+		pollCtx, cancel := context.WithTimeout(ctx, c.pollTimeout)
+		fetches := c.client.PollFetches(pollCtx)
+		cancel()
+		c.cfg.Heartbeat.Beat()
 		if fetches.IsClientClosed() || ctx.Err() != nil {
 			return nil
 		}
 		fetches.EachError(func(topic string, partition int32, err error) {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return // истёк pollTimeout: новых записей нет, это не ошибка
+			}
 			slog.Error("kafka fetch", "topic", topic, "partition", partition, "err", err)
 		})
 		fetches.EachPartition(func(p kgo.FetchTopicPartition) {
@@ -334,6 +352,7 @@ func (w *partitionWorker) handleBatch(ctx context.Context, records []*kgo.Record
 func (w *partitionWorker) handleWithRetry(ctx context.Context, records []*kgo.Record) ([]DLQRecord, bool) {
 	backoff := retryBackoffMin
 	for {
+		w.consumer.cfg.Heartbeat.Beat()
 		dead, err := w.consumer.handler.HandleBatch(ctx, records)
 		if err == nil {
 			return dead, true
@@ -380,6 +399,7 @@ func (w *partitionWorker) sendDLQ(ctx context.Context, src *kgo.Record, reason, 
 
 	backoff := retryBackoffMin
 	for {
+		c.cfg.Heartbeat.Beat()
 		err := c.client.ProduceSync(ctx, dlq).FirstErr()
 		if err == nil {
 			c.metrics.dlq.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))

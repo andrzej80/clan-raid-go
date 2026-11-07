@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/andrzej80/clan-raid-go/internal/domain"
+	"github.com/andrzej80/clan-raid-go/internal/health"
 )
 
 const (
@@ -36,6 +37,8 @@ type Config struct {
 	PollInterval time.Duration
 	// MeterProvider необязателен: по умолчанию используется глобальный.
 	MeterProvider metric.MeterProvider
+	// Heartbeat необязателен: отметка живости для /livez, ставится на каждой итерации цикла.
+	Heartbeat *health.Heartbeat
 }
 
 // Relay в цикле берёт пачку неотправленных записей, публикует её и помечает отправленной —
@@ -76,6 +79,7 @@ func (r *Relay) unsent(ctx context.Context) (int64, error) {
 func (r *Relay) Run(ctx context.Context) error {
 	backoff := retryBackoffMin
 	for ctx.Err() == nil {
+		r.cfg.Heartbeat.Beat()
 		n, err := r.relayBatch(ctx)
 		switch {
 		case err != nil:

@@ -23,6 +23,7 @@ import (
 	"github.com/andrzej80/clan-raid-go/internal/config"
 	"github.com/andrzej80/clan-raid-go/internal/domain"
 	"github.com/andrzej80/clan-raid-go/internal/grpcapi"
+	probes "github.com/andrzej80/clan-raid-go/internal/health"
 	"github.com/andrzej80/clan-raid-go/internal/interceptors"
 	"github.com/andrzej80/clan-raid-go/internal/kafka"
 	"github.com/andrzej80/clan-raid-go/internal/raid"
@@ -112,14 +113,15 @@ func run(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 
-	hs := health.NewServer()
-	defer hs.Shutdown()
-	healthpb.RegisterHealthServer(srv, hs)
-
 	// Redis здесь намеренно нет: это не критичная зависимость. Лимит при его сбое держит Memory,
 	// а Attack от Redis не зависит. Если появится чтение, которому некуда деться без Redis
 	// (например, GetLeaderboard без фоллбэка на Postgres), решение стоит пересмотреть.
-	go watchHealth(ctx, append(dependencies{{name: "postgres", pinger: dbPool, timeout: dbPingTimeout}}, deps...), hs)
+	stopHealth, err := startHealth(ctx, cfg, srv,
+		append(dependencies{{name: "postgres", pinger: dbPool, timeout: dbPingTimeout}}, deps...))
+	if err != nil {
+		return err
+	}
+	defer stopHealth()
 
 	errCh := make(chan error, 1)
 
@@ -201,6 +203,34 @@ type dependency struct {
 
 // dependencies считает сервис здоровым, только если отвечают все зависимости.
 type dependencies []dependency
+
+// startHealth регистрирует gRPC health и поднимает HTTP-пробы с pprof. Своего цикла у api нет
+// (gRPC-сервер сам обслуживает запросы), поэтому liveness без отметки, а readiness проверяет те же
+// зависимости, что gRPC health. Возвращённая функция останавливает пробы, затем gRPC health.
+func startHealth(ctx context.Context, cfg *config.Config, srv *grpc.Server, deps dependencies) (func(), error) {
+	hs := health.NewServer()
+	healthpb.RegisterHealthServer(srv, hs)
+	go watchHealth(ctx, deps, hs)
+
+	stopProbes, err := app.StartProbes(ctx, cfg.Probe, nil, deps.checks()...)
+	if err != nil {
+		hs.Shutdown()
+		return nil, err
+	}
+	return func() {
+		stopProbes()
+		hs.Shutdown()
+	}, nil
+}
+
+// checks — те же зависимости в виде проверок HTTP readiness.
+func (d dependencies) checks() []probes.Check {
+	out := make([]probes.Check, len(d))
+	for i, dep := range d {
+		out[i] = probes.Check{Name: dep.name, Timeout: dep.timeout, Ping: dep.pinger.Ping}
+	}
+	return out
+}
 
 func (d dependencies) Ping(ctx context.Context) error {
 	for _, dep := range d {

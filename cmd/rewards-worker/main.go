@@ -7,6 +7,7 @@ import (
 
 	"github.com/andrzej80/clan-raid-go/internal/app"
 	"github.com/andrzej80/clan-raid-go/internal/config"
+	"github.com/andrzej80/clan-raid-go/internal/health"
 	"github.com/andrzej80/clan-raid-go/internal/kafka"
 	"github.com/andrzej80/clan-raid-go/internal/rewards"
 	"github.com/andrzej80/clan-raid-go/internal/storage/pg"
@@ -39,6 +40,7 @@ func run(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 
+	heartbeat := health.NewHeartbeat()
 	consumer, err := kafka.NewRaidEventsConsumer(kafka.ConsumerConfig{
 		Brokers:      cfg.Kafka.Brokers,
 		Topic:        cfg.Kafka.EventsTopic,
@@ -46,6 +48,7 @@ func run(ctx context.Context, cfg *config.Config) error {
 		Group:        cfg.Kafka.RewardsGroup,
 		BatchSize:    cfg.Kafka.BatchSize,
 		BatchTimeout: cfg.Kafka.BatchTimeout,
+		Heartbeat:    heartbeat,
 	}, processor)
 	if err != nil {
 		return err
@@ -53,6 +56,12 @@ func run(ctx context.Context, cfg *config.Config) error {
 	// Close после Run: горутины партиций к этому моменту дообработали и закоммитили свои пачки,
 	// а пул Postgres (defer выше) закрывается уже после выхода из группы.
 	defer consumer.Close()
+
+	stopProbes, err := app.StartProbes(ctx, cfg.Probe, heartbeat, app.PostgresCheck(dbPool), app.KafkaCheck(consumer))
+	if err != nil {
+		return err
+	}
+	defer stopProbes()
 
 	slog.Info("rewards-worker started",
 		"topic", cfg.Kafka.EventsTopic, "group", cfg.Kafka.RewardsGroup, "rewards_topic", cfg.Kafka.RewardsTopic)
