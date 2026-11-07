@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -311,4 +312,32 @@ func TestConsumer_HeartbeatWhileIdleAndRetrying(t *testing.T) {
 	if since := time.Since(hb.Last()); since > time.Second {
 		t.Fatalf("last heartbeat %v ago, want recent", since)
 	}
+}
+
+// hangingOnceProcessor в первом вызове не отвечает, пока не истечёт контекст (Postgres на паузе).
+type hangingOnceProcessor struct {
+	fakeProcessor
+	hung atomic.Bool
+}
+
+func (p *hangingOnceProcessor) ProcessBatch(ctx context.Context, hits []domain.Hit) (domain.BatchResult, error) {
+	if p.hung.CompareAndSwap(false, true) {
+		<-ctx.Done()
+		return domain.BatchResult{}, ctx.Err()
+	}
+	return p.fakeProcessor.ProcessBatch(ctx, hits)
+}
+
+func TestConsumer_AttemptTimeoutRetriesHangingBatch(t *testing.T) {
+	t.Parallel()
+
+	brokers := startConsumerCluster(t)
+	publishHits(t, brokers, newHit(uuid.New()))
+
+	proc := &hangingOnceProcessor{}
+	c := newConsumer(t, brokers, proc)
+	c.attemptTimeout = 50 * time.Millisecond
+	startConsumer(t, c)
+
+	eventually(t, "hit processed after the hanging attempt timed out", func() bool { return len(proc.seen()) == 1 })
 }

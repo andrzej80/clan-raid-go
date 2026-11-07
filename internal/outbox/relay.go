@@ -39,7 +39,15 @@ type Config struct {
 	MeterProvider metric.MeterProvider
 	// Heartbeat необязателен: отметка живости для /livez, ставится на каждой итерации цикла.
 	Heartbeat *health.Heartbeat
+	// BatchTimeout ограничивает одну пачку (блокировка, публикация, пометка, коммит); 0 —
+	// DefaultBatchTimeout. Без него пачка висит, пока Postgres или Kafka не отвечают, держит
+	// транзакцию и liveness ложно считает relay зависшим. По таймауту транзакция откатывается,
+	// записи остаются неотправленными; уже опубликованные уйдут повторно (at-least-once).
+	BatchTimeout time.Duration
 }
+
+// DefaultBatchTimeout — меньше health.DefaultMaxStall с запасом на паузу между повторами.
+const DefaultBatchTimeout = 30 * time.Second
 
 // Relay в цикле берёт пачку неотправленных записей, публикует её и помечает отправленной —
 // всё в одной транзакции. Записи держит FOR UPDATE SKIP LOCKED, поэтому несколько экземпляров
@@ -58,6 +66,9 @@ type Relay struct {
 func NewRelay(tx domain.TxManager, store domain.OutboxRelayStore, pub Publisher, cfg Config) (*Relay, error) {
 	if cfg.BatchSize < 1 || cfg.PollInterval <= 0 {
 		return nil, errors.New("outbox: batch size and poll interval must be positive")
+	}
+	if cfg.BatchTimeout <= 0 {
+		cfg.BatchTimeout = DefaultBatchTimeout
 	}
 	r := &Relay{tx: tx, store: store, pub: pub, cfg: cfg}
 	metrics, err := newRelayMetrics(cfg.MeterProvider, r.unsent)
@@ -105,9 +116,10 @@ func (r *Relay) Run(ctx context.Context) error {
 // relayBatch переносит одну пачку и возвращает число отправленных записей.
 func (r *Relay) relayBatch(ctx context.Context) (int, error) {
 	start := time.Now()
-	// Контекст отвязан от сигнала остановки: см. Run. Длительность ограничена таймаутом доставки
-	// в Kafka, а при недоступной БД ошибку вернёт сам драйвер.
-	ctx = context.WithoutCancel(ctx)
+	// Контекст отвязан от сигнала остановки (см. Run), но ограничен BatchTimeout: ни таймаут
+	// доставки franz-go, ни драйвер Postgres не гарантируют возврат, если сервер молчит.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.cfg.BatchTimeout)
+	defer cancel()
 
 	var sent int
 	err := r.tx.WithinTx(ctx, func(ctx context.Context) error {

@@ -71,6 +71,10 @@ type ConsumerConfig struct {
 // стоял бы бесконечно и не отмечал живость.
 const pollTimeout = 5 * time.Second
 
+// attemptTimeout ограничивает одну попытку обработки пачки. Пачка в 500 ударов обычно занимает
+// миллисекунды; предел меньше health.DefaultMaxStall с запасом на паузу между повторами (до 5 с).
+const attemptTimeout = 30 * time.Second
+
 // Consumer читает raid.hits группой консьюмеров. На каждую назначенную партицию — своя горутина:
 // она копит пачку (до BatchSize записей или BatchTimeout), обрабатывает её и только после этого
 // коммитит offset. Автокоммит выключен: гарантия at-least-once.
@@ -80,8 +84,9 @@ type Consumer struct {
 	cfg     ConsumerConfig
 	metrics *consumerMetrics
 	lagReg  metric.Registration
-	// pollTimeout — длительность одного ожидания PollFetches; в тестах короче.
-	pollTimeout time.Duration
+	// pollTimeout и attemptTimeout — одноимённые константы; в тестах короче.
+	pollTimeout    time.Duration
+	attemptTimeout time.Duration
 
 	// workCtx живёт до Close: пачка, начатая при остановке, должна дообработаться, поэтому он
 	// не привязан к контексту Run (его отменяет сигнал).
@@ -118,11 +123,12 @@ func NewBatchConsumer(cfg ConsumerConfig, handler BatchHandler, extra ...kgo.Opt
 	}
 
 	c := &Consumer{
-		handler:     handler,
-		cfg:         cfg,
-		metrics:     metrics,
-		partitions:  make(map[topicPartition]*partitionWorker),
-		pollTimeout: pollTimeout,
+		handler:        handler,
+		cfg:            cfg,
+		metrics:        metrics,
+		partitions:     make(map[topicPartition]*partitionWorker),
+		pollTimeout:    pollTimeout,
+		attemptTimeout: attemptTimeout,
 	}
 	c.workCtx, c.cancelWork = context.WithCancel(context.Background())
 	opts := append([]kgo.Opt{
@@ -353,7 +359,7 @@ func (w *partitionWorker) handleWithRetry(ctx context.Context, records []*kgo.Re
 	backoff := retryBackoffMin
 	for {
 		w.consumer.cfg.Heartbeat.Beat()
-		dead, err := w.consumer.handler.HandleBatch(ctx, records)
+		dead, err := w.handleAttempt(ctx, records)
 		if err == nil {
 			return dead, true
 		}
@@ -365,6 +371,15 @@ func (w *partitionWorker) handleWithRetry(ctx context.Context, records []*kgo.Re
 		}
 		backoff = min(backoff*2, retryBackoffMax)
 	}
+}
+
+// handleAttempt — одна попытка обработать пачку, ограниченная attemptTimeout. Без ограничения
+// попытка висит, пока Postgres молчит (соединение не рвётся), повторов нет, и liveness ложно
+// считает консьюмер зависшим. По таймауту транзакции откатываются, пачка повторяется.
+func (w *partitionWorker) handleAttempt(ctx context.Context, records []*kgo.Record) ([]DLQRecord, error) {
+	ctx, cancel := context.WithTimeout(ctx, w.consumer.attemptTimeout)
+	defer cancel()
+	return w.consumer.handler.HandleBatch(ctx, records)
 }
 
 // wait ждёт d; false — если за это время пришла остановка.

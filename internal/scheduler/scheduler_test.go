@@ -245,3 +245,52 @@ func TestRun_BeatsHeartbeatOnEveryPass(t *testing.T) {
 		t.Fatalf("last heartbeat %v ago, want a beat on every pass", since)
 	}
 }
+
+// hangingExpiry не отвечает, пока не истечёт контекст: так ведёт себя Postgres на паузе.
+type hangingExpiry struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (f *hangingExpiry) ExpireDue(ctx context.Context) ([]domain.ExpiredRaid, error) {
+	f.mu.Lock()
+	f.calls++
+	f.mu.Unlock()
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (f *hangingExpiry) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+func TestRun_PassTimeoutKeepsLoopAlive(t *testing.T) {
+	t.Parallel()
+
+	expiry := &hangingExpiry{}
+	hb := &health.Heartbeat{}
+	s, err := New(fakeTx{}, expiry, &fakeOutbox{}, Config{
+		Interval: 5 * time.Millisecond, EventsTopic: "raid.events", Heartbeat: hb, PassTimeout: 20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() { _ = s.Run(ctx) }()
+
+	deadline := time.After(2 * time.Second)
+	for expiry.callCount() < 3 {
+		select {
+		case <-deadline:
+			t.Fatalf("hanging pass was not cut by PassTimeout: %d calls", expiry.callCount())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if since := time.Since(hb.Last()); since > time.Second {
+		t.Fatalf("last heartbeat %v ago, want the loop to keep beating", since)
+	}
+}

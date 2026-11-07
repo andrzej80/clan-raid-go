@@ -34,7 +34,14 @@ type Config struct {
 	Publisher ExpiredPublisher
 	// Heartbeat необязателен: отметка живости для /livez, ставится на каждом проходе.
 	Heartbeat *health.Heartbeat
+	// PassTimeout ограничивает один проход; 0 — DefaultPassTimeout. Без него проход висит, пока
+	// Postgres не отвечает (соединение не рвётся, а молчит), и liveness ложно считает сервис
+	// зависшим. С ним проход завершается ошибкой и повторяется на следующем тике.
+	PassTimeout time.Duration
 }
+
+// DefaultPassTimeout — меньше health.DefaultMaxStall с запасом на интервал между проходами.
+const DefaultPassTimeout = 30 * time.Second
 
 // ExpiredPublisher сообщает подписчикам WatchRaid, что время рейда вышло.
 type ExpiredPublisher interface {
@@ -61,6 +68,9 @@ func New(
 	if cfg.Interval <= 0 || cfg.EventsTopic == "" {
 		return nil, errors.New("scheduler: interval must be positive and events topic is required")
 	}
+	if cfg.PassTimeout <= 0 {
+		cfg.PassTimeout = DefaultPassTimeout
+	}
 	metrics, err := newSchedulerMetrics(cfg.MeterProvider)
 	if err != nil {
 		return nil, err
@@ -76,7 +86,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 
 	for {
 		s.cfg.Heartbeat.Beat()
-		if n, err := s.ExpireOnce(ctx); err != nil {
+		if n, err := s.expireBounded(ctx); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -92,6 +102,12 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+func (s *Scheduler) expireBounded(ctx context.Context) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.cfg.PassTimeout)
+	defer cancel()
+	return s.ExpireOnce(ctx)
 }
 
 // ExpireOnce выполняет один проход и возвращает число истёкших рейдов.

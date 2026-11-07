@@ -280,3 +280,53 @@ func TestRun_BeatsHeartbeatWhileIdle(t *testing.T) {
 		}
 	}
 }
+
+// hangingPublisher не отвечает, пока не истечёт контекст: так ведут себя Kafka или Postgres,
+// которые молчат, а не рвут соединение.
+type hangingPublisher struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *hangingPublisher) PublishBatch(ctx context.Context, _ []domain.OutboxMessage) error {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (p *hangingPublisher) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+func TestRun_BatchTimeoutKeepsLoopAlive(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeStore(3)
+	pub := &hangingPublisher{}
+	r, err := NewRelay(fakeTx{store}, store, pub, Config{
+		BatchSize: 10, PollInterval: 5 * time.Millisecond, BatchTimeout: 20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewRelay: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() { _ = r.Run(ctx) }()
+
+	deadline := time.After(3 * time.Second)
+	for pub.callCount() < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("hanging batch was not cut by BatchTimeout: %d calls", pub.callCount())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if store.sentCount() != 0 {
+		t.Fatalf("timed out batch must roll back, sent = %d", store.sentCount())
+	}
+}
