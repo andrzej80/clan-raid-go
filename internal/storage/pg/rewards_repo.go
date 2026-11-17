@@ -1,9 +1,11 @@
 package pg
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -70,6 +72,16 @@ func (r *RewardsRepo) InsertRewards(
 	if len(rewards) == 0 {
 		return nil, nil
 	}
+	// Единый порядок вставки: параллельные воркеры берут блокировки уникального индекса в одной
+	// последовательности, иначе при случайном порядке (обход map) возможен deadlock (40P01).
+	rewards = slices.Clone(rewards)
+	slices.SortFunc(rewards, func(a, b domain.Reward) int {
+		if c := cmp.Compare(a.PlayerID, b.PlayerID); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Kind, b.Kind)
+	})
+
 	players := make([]int64, len(rewards))
 	kinds := make([]string, len(rewards))
 	amounts := make([]int32, len(rewards))
